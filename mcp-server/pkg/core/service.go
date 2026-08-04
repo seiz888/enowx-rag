@@ -6,6 +6,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -330,6 +331,15 @@ func (s *Service) Search(ctx context.Context, projectID, query string, opts Sear
 			docs[i] = c.Content
 		}
 		hits, rerr := s.reranker.Rerank(ctx, query, docs, k)
+		// A silent fallback makes a transient reranker failure indistinguishable
+		// from "no reranker configured". Log to stderr — stdout carries the MCP
+		// protocol in stdio mode, so only stderr is safe here.
+		switch {
+		case rerr != nil:
+			log.Printf("rerank: %d candidates failed, falling back to semantic order: %v", len(docs), rerr)
+		case len(hits) == 0:
+			log.Printf("rerank: %d candidates returned no hits, falling back to semantic order", len(docs))
+		}
 		if rerr == nil && len(hits) > 0 {
 			reranked := make([]rag.Result, 0, len(hits))
 			for _, h := range hits {
