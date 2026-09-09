@@ -38,7 +38,7 @@ type ProjectStat struct {
 
 // Event is a single SSE event published by the EventBus.
 type Event struct {
-	Type      string    `json:"type"`              // e.g. "index_started", "query_executed"
+	Type      string    `json:"type"` // e.g. "index_started", "query_executed"
 	Timestamp time.Time `json:"timestamp"`
 	Data      any       `json:"data,omitempty"`
 }
@@ -101,14 +101,15 @@ func (b *EventBus) Publish(ev Event) {
 // Service wraps a provider, an optional reranker, and an indexer behind a
 // single API used by both the MCP stdio handlers and the HTTP API layer.
 type Service struct {
-	provider   rag.Provider
-	reranker   rag.Reranker // may be nil
-	indexer    *indexer.Indexer
-	events     *EventBus
-	embedModel string // optional: set by main.go for stats endpoint
+	provider     rag.Provider
+	reranker     rag.Reranker // may be nil
+	indexer      *indexer.Indexer
+	events       *EventBus
+	embedModel   string // optional: set by main.go for stats endpoint
 	metrics      *Metrics
 	metricsStore MetricsStore // optional durable metrics; nil = in-memory only
 	backend      string       // vector store name (e.g. "qdrant"), set by main.go
+	writeGuard   *WriteGuard  // optional per-project write contract; nil = no checks
 }
 
 // MetricsStore is an optional durable sink for query metrics, injected into
@@ -183,6 +184,12 @@ func (s *Service) EmbedModel() string {
 		return s.embedModel
 	}
 	return "unknown"
+}
+
+// SetWriteGuard installs the per-project write contract. A nil guard disables
+// every check, which is the default.
+func (s *Service) SetWriteGuard(g *WriteGuard) {
+	s.writeGuard = g
 }
 
 // SetBackend records the active vector store name (e.g. "qdrant", "pgvector")
@@ -618,6 +625,12 @@ func (s *Service) DeletePoints(ctx context.Context, projectID string, pointIDs [
 // IndexDocuments indexes a batch of documents into the project collection
 // directly (without scanning a directory). This is used by the rag_index MCP tool.
 func (s *Service) IndexDocuments(ctx context.Context, projectID string, docs []rag.Document) error {
+	// Checked before the provider call, so a rejected batch is never partially
+	// embedded: Voyage bills per embed and a half-written batch leaves the caller
+	// guessing which documents landed.
+	if err := s.writeGuard.Check(projectID, docs); err != nil {
+		return err
+	}
 	if err := s.provider.Index(ctx, projectID, docs); err != nil {
 		return fmt.Errorf("index documents: %w", err)
 	}

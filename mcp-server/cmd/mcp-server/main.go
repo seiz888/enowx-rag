@@ -251,6 +251,10 @@ func main() {
 	svc := buildService(provider, reranker, idx)
 	svc.SetEmbedModel(cfg.VoyageModel)
 	svc.SetBackend(cfg.VectorStore)
+	if g := core.WriteGuardFromEnv(); g != nil {
+		svc.SetWriteGuard(g)
+		log.Printf("write guard: %s", g.Describe())
+	}
 
 	// Durable metrics: a local SQLite file (pure-Go, no cgo) that works with any
 	// vector-store backend. If it can't be opened, fall back to in-memory
