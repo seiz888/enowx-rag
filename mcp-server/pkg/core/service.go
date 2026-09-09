@@ -19,7 +19,21 @@ import (
 const DefaultK = 5
 
 // DefaultRecall is the default number of candidates retrieved before rerank.
-const DefaultRecall = 40
+//
+// 25, not 40: rerank is ~99.7% of this instance's token spend and its bill scales
+// with this number alone (k only trims what was already scored). Measured on the
+// `memory` corpus, 51 paraphrased questions with every acceptable answer labelled
+// (~/.claude/scripts/rag_eval.py --set hard --sweep 12,25,40,60): hit@1 is 36/51 at
+// 25, 40 and 60 alike, hit@3 peaks at 25 (47/51) and DROPS as recall grows -- extra
+// candidates give the reranker more chances to promote a near-miss above the right
+// document. So 40 was paying 60% more per query to answer no additional question.
+//
+// 12 is genuinely worse (43/51 hit@3), so this is a knee and not a "smaller is
+// better" curve. Re-run that harness before moving this number again; it moved once
+// already because the corpus was re-chunked underneath the old measurement, and the
+// value it moved away from had been fitted to a 12-question set whose labels were
+// too narrow to see this.
+const DefaultRecall = 25
 
 // SearchOpts controls the behaviour of Service.Search.
 type SearchOpts struct {
