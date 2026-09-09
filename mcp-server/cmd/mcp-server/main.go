@@ -155,7 +155,12 @@ type SemanticSearchInput struct {
 	Hybrid    *bool  `json:"hybrid" jsonschema:"Combine dense + lexical search when the backend supports it (default true)"`
 	Rerank    *bool  `json:"rerank" jsonschema:"Rerank candidates with the reranker when configured (default true)"`
 	Compress  bool   `json:"compress" jsonschema:"Drop near-duplicate results (default false)"`
-	MaxPerDoc int    `json:"max_per_doc" jsonschema:"Keep at most this many chunks per document; 0 = no cap (default). Use 1 for breadth -- at limit=10 on this corpus 42% of slots are repeat documents"`
+	// `omitempty` matters here, and not for tidiness: this SDK's schema inference
+	// puts every struct field in `required` unless the tag says omitempty
+	// (jsonschema-go infer.go:218). Without it, adding this option would have
+	// made it mandatory -- a strict MCP client would reject the seven-field call
+	// the skill documents, so an opt-in knob would have broken every caller.
+	MaxPerDoc int `json:"max_per_doc,omitempty" jsonschema:"Keep at most this many chunks per document; 0 = no cap (default). Use 1 for breadth -- at limit=10 on this corpus 42% of slots are repeat documents"`
 }
 
 type RetrieveContextInput struct {
@@ -166,7 +171,12 @@ type RetrieveContextInput struct {
 	Hybrid    *bool  `json:"hybrid" jsonschema:"Combine dense + lexical search when the backend supports it (default true)"`
 	Rerank    *bool  `json:"rerank" jsonschema:"Rerank candidates with the reranker when configured (default true)"`
 	Compress  bool   `json:"compress" jsonschema:"Drop near-duplicate results (default false)"`
-	MaxPerDoc int    `json:"max_per_doc" jsonschema:"Keep at most this many chunks per document; 0 = no cap (default)"`
+	// `omitempty` matters here, and not for tidiness: this SDK's schema inference
+	// puts every struct field in `required` unless the tag says omitempty
+	// (jsonschema-go infer.go:218). Without it, adding this option would have
+	// made it mandatory -- a strict MCP client would reject the seven-field call
+	// the skill documents, so an opt-in knob would have broken every caller.
+	MaxPerDoc int `json:"max_per_doc,omitempty" jsonschema:"Keep at most this many chunks per document; 0 = no cap (default)"`
 }
 
 // searchOptsFromMCP builds SearchOpts from MCP tool inputs. Hybrid and Rerank
