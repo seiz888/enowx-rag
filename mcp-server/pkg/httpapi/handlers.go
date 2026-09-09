@@ -235,6 +235,7 @@ func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 		Hybrid    bool   `json:"hybrid"`
 		Rerank    bool   `json:"rerank"`
 		Compress  bool   `json:"compress"`
+		MaxPerDoc int    `json:"max_per_doc"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
@@ -268,12 +269,13 @@ func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results, err := h.svc.Search(r.Context(), req.ProjectID, req.Query, core.SearchOpts{
-		K:        req.K,
-		Recall:   req.Recall,
-		Hybrid:   req.Hybrid,
-		Rerank:   req.Rerank,
-		Compress: req.Compress,
-		NoLog:    noLog(r),
+		K:         req.K,
+		Recall:    req.Recall,
+		Hybrid:    req.Hybrid,
+		Rerank:    req.Rerank,
+		Compress:  req.Compress,
+		MaxPerDoc: req.MaxPerDoc,
+		NoLog:     noLog(r),
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())

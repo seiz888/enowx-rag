@@ -56,6 +56,27 @@ type SearchOpts struct {
 	// the flag should end up in the log, because a missing real query is the
 	// failure that costs something and a missing synthetic one costs nothing.
 	NoLog bool
+
+	// MaxPerDoc caps how many chunks of the same document may appear in the
+	// results. 0 (the default) means no cap, which is what the server has always
+	// done and what a caller reading a long document still wants.
+	//
+	// Why it is worth having: `k` counts chunks, not documents, so sibling chunks
+	// of one document can take most of the answer. Measured on the `memory`
+	// corpus over the 71 eval questions at k=10 -- 710 slots returned covered 414
+	// distinct documents, so 42% of the slots (and 40% of the returned text) were
+	// repeat documents. A caller asking for 10 got fewer than 6 documents.
+	//
+	// Why it is NOT the default: those sibling chunks are often the rest of the
+	// answer. Capping helps breadth per token, not ranking quality -- the
+	// document-level hit@3 gain it shows in the harness is partly an artefact of
+	// measuring by document. So the caller who wants breadth asks for it.
+	//
+	// When set, the reranker is asked to score every candidate rather than only
+	// the top k, so a capped-out slot can be refilled from further down. That
+	// costs nothing extra: rerank is billed per candidate, and k only trims what
+	// was already scored.
+	MaxPerDoc int
 }
 
 // ProjectStat holds per-project statistics returned by ListProjects.
@@ -385,7 +406,12 @@ func (s *Service) Search(ctx context.Context, projectID, query string, opts Sear
 		for i, c := range cands {
 			docs[i] = c.Content
 		}
-		hits, rerr := s.reranker.Rerank(ctx, query, docs, k)
+		// Score everything when a per-document cap is in play; see MaxPerDoc.
+		topK := k
+		if opts.MaxPerDoc > 0 {
+			topK = len(cands)
+		}
+		hits, rerr := s.reranker.Rerank(ctx, query, docs, topK)
 		// A silent fallback makes a transient reranker failure indistinguishable
 		// from "no reranker configured". Log to stderr — stdout carries the MCP
 		// protocol in stdio mode, so only stderr is safe here.
@@ -405,6 +431,7 @@ func (s *Service) Search(ctx context.Context, projectID, query string, opts Sear
 				r.Score = h.Score
 				reranked = append(reranked, r)
 			}
+			reranked = capPerDoc(reranked, opts.MaxPerDoc)
 			// Defensive clamp: don't rely on the reranker API honoring top_k.
 			if len(reranked) > k {
 				reranked = reranked[:k]
@@ -417,6 +444,7 @@ func (s *Service) Search(ctx context.Context, projectID, query string, opts Sear
 		// Reranker failed or returned empty: fall back to semantic order.
 	}
 
+	cands = capPerDoc(cands, opts.MaxPerDoc)
 	if len(cands) > k {
 		cands = cands[:k]
 	}
@@ -445,6 +473,37 @@ func rerankMoved(cands, reranked []rag.Result) int {
 		}
 	}
 	return moved
+}
+
+// capPerDoc keeps at most max chunks per document, preserving score order.
+//
+// Grouping is by the `doc_id` meta with any `#N` chunk suffix removed, because
+// that suffix is how this corpus names chunks of one document. A result with no
+// doc_id is never grouped with another -- it is its own document as far as this
+// function can tell, and silently collapsing unlabelled results would drop
+// content for a reason the caller cannot see.
+func capPerDoc(results []rag.Result, max int) []rag.Result {
+	if max <= 0 || len(results) < 2 {
+		return results
+	}
+	seen := make(map[string]int, len(results))
+	out := results[:0:0] // new backing array; don't mutate the caller's slice
+	for _, r := range results {
+		doc := r.Meta["doc_id"]
+		if i := strings.LastIndex(doc, "#"); i > 0 {
+			doc = doc[:i]
+		}
+		if doc == "" {
+			out = append(out, r)
+			continue
+		}
+		if seen[doc] >= max {
+			continue
+		}
+		seen[doc]++
+		out = append(out, r)
+	}
+	return out
 }
 
 // maybeCompress removes near-duplicate results when compress is true, preserving

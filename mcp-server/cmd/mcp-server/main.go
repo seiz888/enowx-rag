@@ -155,6 +155,7 @@ type SemanticSearchInput struct {
 	Hybrid    *bool  `json:"hybrid" jsonschema:"Combine dense + lexical search when the backend supports it (default true)"`
 	Rerank    *bool  `json:"rerank" jsonschema:"Rerank candidates with the reranker when configured (default true)"`
 	Compress  bool   `json:"compress" jsonschema:"Drop near-duplicate results (default false)"`
+	MaxPerDoc int    `json:"max_per_doc" jsonschema:"Keep at most this many chunks per document; 0 = no cap (default). Use 1 for breadth -- at limit=10 on this corpus 42% of slots are repeat documents"`
 }
 
 type RetrieveContextInput struct {
@@ -165,20 +166,22 @@ type RetrieveContextInput struct {
 	Hybrid    *bool  `json:"hybrid" jsonschema:"Combine dense + lexical search when the backend supports it (default true)"`
 	Rerank    *bool  `json:"rerank" jsonschema:"Rerank candidates with the reranker when configured (default true)"`
 	Compress  bool   `json:"compress" jsonschema:"Drop near-duplicate results (default false)"`
+	MaxPerDoc int    `json:"max_per_doc" jsonschema:"Keep at most this many chunks per document; 0 = no cap (default)"`
 }
 
 // searchOptsFromMCP builds SearchOpts from MCP tool inputs. Hybrid and Rerank
 // default to true (nil pointer) so the built-in hybrid/rerank features are used
 // by default from MCP clients; they only take effect when the backend/reranker
 // supports them (otherwise Search falls back gracefully).
-func searchOptsFromMCP(limit, recall int, hybrid, rerank *bool, compress bool) core.SearchOpts {
+func searchOptsFromMCP(limit, recall int, hybrid, rerank *bool, compress bool, maxPerDoc int) core.SearchOpts {
 	b := func(p *bool) bool { return p == nil || *p }
 	return core.SearchOpts{
-		K:        limit,
-		Recall:   recall,
-		Hybrid:   b(hybrid),
-		Rerank:   b(rerank),
-		Compress: compress,
+		K:         limit,
+		Recall:    recall,
+		Hybrid:    b(hybrid),
+		Rerank:    b(rerank),
+		Compress:  compress,
+		MaxPerDoc: maxPerDoc,
 	}
 }
 
@@ -380,7 +383,7 @@ func registerMCPTools(server *mcp.Server, svc *core.Service) {
 		Name:        "rag_semantic_search",
 		Description: "Semantic search over a project collection. Returns the most relevant chunks with similarity scores.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in SemanticSearchInput) (*mcp.CallToolResult, any, error) {
-		opts := searchOptsFromMCP(in.Limit, in.Recall, in.Hybrid, in.Rerank, in.Compress)
+		opts := searchOptsFromMCP(in.Limit, in.Recall, in.Hybrid, in.Rerank, in.Compress, in.MaxPerDoc)
 		res, err := svc.Search(ctx, in.ProjectID, in.Query, opts)
 		if err != nil {
 			return nil, nil, err
@@ -392,7 +395,7 @@ func registerMCPTools(server *mcp.Server, svc *core.Service) {
 		Name:        "rag_retrieve_context",
 		Description: "Retrieve a compact context string for a project. Fetches top chunks and concatenates them for LLM context.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in RetrieveContextInput) (*mcp.CallToolResult, any, error) {
-		opts := searchOptsFromMCP(in.Limit, in.Recall, in.Hybrid, in.Rerank, in.Compress)
+		opts := searchOptsFromMCP(in.Limit, in.Recall, in.Hybrid, in.Rerank, in.Compress, in.MaxPerDoc)
 		context, chunks, err := svc.RetrieveContext(ctx, in.ProjectID, in.Query, opts)
 		if err != nil {
 			return nil, nil, err

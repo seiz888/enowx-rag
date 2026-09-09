@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,28 +19,28 @@ import (
 // --- Mock Provider ---
 
 type mockProvider struct {
-	mu               sync.Mutex
-	createCalls      int
-	deleteCalls      int
-	indexCalls       int
-	searchCalls      int
-	deletePtCalls    int
-	listPointsCalls  int
-	closeCalls       int
+	mu              sync.Mutex
+	createCalls     int
+	deleteCalls     int
+	indexCalls      int
+	searchCalls     int
+	deletePtCalls   int
+	listPointsCalls int
+	closeCalls      int
 
 	// Hybrid search tracking
 	hybridCalls int
 
 	// Configurable behaviours
-	searchErr   error
-	searchLimit int // captured limit
-	results     []rag.Result
-	points      []rag.PointInfo
-	indexErr    error
-	createErr   error
-	deleteErr   error
-	deletePtErr  error
-	listPtsErr   error
+	searchErr        error
+	searchLimit      int // captured limit
+	results          []rag.Result
+	points           []rag.PointInfo
+	indexErr         error
+	createErr        error
+	deleteErr        error
+	deletePtErr      error
+	listPtsErr       error
 	listedProjectIDs []string
 }
 
@@ -171,13 +174,13 @@ var _ rag.HybridSearcher = (*mockProvider)(nil)
 // --- Mock Reranker ---
 
 type mockReranker struct {
-	mu           sync.Mutex
-	calls        int
-	lastQuery    string
-	lastDocs     []string
-	lastTopK     int
-	rerankErr    error
-	hits         []rag.RerankHit
+	mu        sync.Mutex
+	calls     int
+	lastQuery string
+	lastDocs  []string
+	lastTopK  int
+	rerankErr error
+	hits      []rag.RerankHit
 }
 
 func (m *mockReranker) Rerank(ctx context.Context, query string, docs []string, topK int) ([]rag.RerankHit, error) {
@@ -1049,8 +1052,12 @@ type mockProviderNonHybrid struct {
 	searchCalls int
 }
 
-func (m *mockProviderNonHybrid) CreateCollection(ctx context.Context, projectID string) error { return nil }
-func (m *mockProviderNonHybrid) DeleteCollection(ctx context.Context, projectID string) error { return nil }
+func (m *mockProviderNonHybrid) CreateCollection(ctx context.Context, projectID string) error {
+	return nil
+}
+func (m *mockProviderNonHybrid) DeleteCollection(ctx context.Context, projectID string) error {
+	return nil
+}
 func (m *mockProviderNonHybrid) Index(ctx context.Context, projectID string, docs []rag.Document) error {
 	return nil
 }
@@ -1081,3 +1088,153 @@ func (m *mockProviderNonHybrid) ListPoints(ctx context.Context, projectID string
 func (m *mockProviderNonHybrid) Close() error { return nil }
 
 var _ rag.Provider = (*mockProviderNonHybrid)(nil)
+
+func res(id, doc string) rag.Result {
+	return rag.Result{ID: id, Meta: map[string]string{"doc_id": doc}}
+}
+
+func docsOf(rs []rag.Result) []string {
+	out := make([]string, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, r.Meta["doc_id"])
+	}
+	return out
+}
+
+func TestCapPerDocKeepsBestChunkPerDocument(t *testing.T) {
+	in := []rag.Result{
+		res("a", "memory/x/doc-one#3"),
+		res("b", "memory/x/doc-one#1"),
+		res("c", "memory/y/doc-two#2"),
+		res("d", "memory/x/doc-one#7"),
+		res("e", "memory/y/doc-two#5"),
+	}
+	got := docsOf(capPerDoc(in, 1))
+	want := []string{"memory/x/doc-one#3", "memory/y/doc-two#2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("cap 1 gave %v, want %v", got, want)
+	}
+	// Order must be the incoming score order, not grouped by document: the
+	// caller is handed a ranking, and regrouping it would silently reorder the
+	// answer.
+	got2 := docsOf(capPerDoc(in, 2))
+	want2 := []string{"memory/x/doc-one#3", "memory/x/doc-one#1",
+		"memory/y/doc-two#2", "memory/y/doc-two#5"}
+	if !reflect.DeepEqual(got2, want2) {
+		t.Errorf("cap 2 gave %v, want %v", got2, want2)
+	}
+	// 0 means no cap -- that is the default and must change nothing.
+	if got0 := capPerDoc(in, 0); len(got0) != len(in) {
+		t.Errorf("cap 0 dropped results: %d of %d", len(got0), len(in))
+	}
+}
+
+// A result with no doc_id must never be grouped with another one: they are not
+// known to be the same document, and collapsing them would drop content for a
+// reason the caller cannot see.
+func TestCapPerDocDoesNotGroupUnlabelledResults(t *testing.T) {
+	in := []rag.Result{res("a", ""), res("b", ""), res("c", "d#1"), res("d", "d#2")}
+	got := capPerDoc(in, 1)
+	if len(got) != 3 {
+		t.Fatalf("got %d results (%v), want 3", len(got), docsOf(got))
+	}
+	// A bare doc_id with no chunk suffix still groups.
+	in2 := []rag.Result{res("a", "plain"), res("b", "plain")}
+	if got2 := capPerDoc(in2, 1); len(got2) != 1 {
+		t.Errorf("suffix-less doc_id did not group: %v", docsOf(got2))
+	}
+	// A leading '#' is not a chunk suffix and must not collapse to "".
+	in3 := []rag.Result{res("a", "#1"), res("b", "#2")}
+	if got3 := capPerDoc(in3, 1); len(got3) != 2 {
+		t.Errorf("leading-# ids grouped together: %v", docsOf(got3))
+	}
+}
+
+// The whole point of the option is that a capped-out slot gets refilled from
+// further down the ranking rather than shortening the answer.
+func TestSearchWithMaxPerDocFillsKWithDistinctDocuments(t *testing.T) {
+	prov := &mockProvider{}
+	for i := 1; i <= 12; i++ {
+		doc := fmt.Sprintf("doc-%d", (i+2)/3) // three chunks per document
+		prov.results = append(prov.results, rag.Result{
+			ID: fmt.Sprintf("p%d", i), Content: fmt.Sprintf("chunk %d", i),
+			Score: 1.0 - float64(i)/100, Meta: map[string]string{"doc_id": doc + "#" + strconv.Itoa(i)},
+		})
+	}
+	svc := NewService(prov, nil, nil)
+
+	out, err := svc.Search(context.Background(), "p", "q", SearchOpts{K: 3, Recall: 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := docsOf(out); !reflect.DeepEqual(got, []string{"doc-1#1", "doc-1#2", "doc-1#3"}) {
+		t.Errorf("uncapped search should return chunk order: %v", got)
+	}
+
+	out, err = svc.Search(context.Background(), "p", "q", SearchOpts{K: 3, Recall: 12, MaxPerDoc: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("capped search returned %d results, want k=3", len(out))
+	}
+	seen := map[string]bool{}
+	for _, r := range out {
+		d := r.Meta["doc_id"]
+		d = d[:strings.LastIndex(d, "#")]
+		if seen[d] {
+			t.Errorf("document %s appears twice under MaxPerDoc=1: %v", d, docsOf(out))
+		}
+		seen[d] = true
+	}
+}
+
+// The reranker honours top_k, so a cap that only trimmed the top k would return
+// fewer than k results instead of refilling from further down. This pins the
+// widened top_k request that makes the refill possible -- and pins that it costs
+// no extra rerank input, since every candidate was sent either way.
+func TestSearchWithMaxPerDocWidensRerankTopK(t *testing.T) {
+	prov := &mockProvider{}
+	for i := 1; i <= 9; i++ {
+		prov.results = append(prov.results, rag.Result{
+			ID: fmt.Sprintf("p%d", i), Content: fmt.Sprintf("chunk %d", i),
+			Meta: map[string]string{"doc_id": fmt.Sprintf("doc-%d#%d", (i+2)/3, i)},
+		})
+	}
+	// Identity order, truncated at top_k -- what a real reranker does.
+	rr := &mockReranker{}
+	rr.hits = nil
+	svc := NewService(prov, rr, nil)
+
+	_, err := svc.Search(context.Background(), "p", "q", SearchOpts{K: 3, Recall: 9, Rerank: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.lastTopK != 3 {
+		t.Errorf("uncapped search asked the reranker for top_k=%d, want 3", rr.lastTopK)
+	}
+
+	out, err := svc.Search(context.Background(), "p", "q",
+		SearchOpts{K: 3, Recall: 9, Rerank: true, MaxPerDoc: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.lastTopK != 9 {
+		t.Errorf("capped search asked the reranker for top_k=%d, want every candidate (9)", rr.lastTopK)
+	}
+	if len(rr.lastDocs) != 9 {
+		t.Errorf("reranker was sent %d docs, want 9 either way", len(rr.lastDocs))
+	}
+	if len(out) != 3 {
+		t.Fatalf("capped search returned %d results, want k=3: %v", len(out), docsOf(out))
+	}
+	seen := map[string]bool{}
+	for _, r := range out {
+		d := r.Meta["doc_id"]
+		d = d[:strings.LastIndex(d, "#")]
+		if seen[d] {
+			t.Errorf("document %s twice under MaxPerDoc=1: %v", d, docsOf(out))
+		}
+		seen[d] = true
+	}
+}
