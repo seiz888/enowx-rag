@@ -227,7 +227,8 @@ func TestNewService_NonNil(t *testing.T) {
 	}
 }
 
-// TestSearchDefaults verifies that zero-valued SearchOpts default to K=5, Recall=40.
+// TestSearchDefaults verifies that zero-valued SearchOpts fall back to DefaultRecall
+// (25 since 2026-09-09; it was 40) rather than to a hardcoded number.
 func TestSearchDefaults(t *testing.T) {
 	p := &mockProvider{}
 	svc := NewService(p, nil, nil)

@@ -42,6 +42,20 @@ type SearchOpts struct {
 	Hybrid   bool // use dense+lexical RRF (provider must support it)
 	Rerank   bool // use reranker if configured
 	Compress bool // drop near-duplicate results (same content_hash / identical content)
+
+	// NoLog keeps this query out of the query log. Metrics still count it.
+	//
+	// For synthetic traffic -- the eval harness in ~/.claude/scripts/rag_eval.py
+	// fires 71 questions per run and a sweep multiplies that by four. Those
+	// questions are already written down; logging them buries the handful of real
+	// questions the log exists to surface. Within hours of switching the log on,
+	// 280 of 280 entries were the harness's own, which makes the log useless for
+	// exactly the purpose it was built for.
+	//
+	// Deliberately not the inverse (an opt-in "log this"): a caller that forgets
+	// the flag should end up in the log, because a missing real query is the
+	// failure that costs something and a missing synthetic one costs nothing.
+	NoLog bool
 }
 
 // ProjectStat holds per-project statistics returned by ListProjects.
@@ -121,10 +135,10 @@ type Service struct {
 	events       *EventBus
 	embedModel   string // optional: set by main.go for stats endpoint
 	metrics      *Metrics
-	metricsStore MetricsStore // optional durable metrics; nil = in-memory only
+	metricsStore MetricsStore  // optional durable metrics; nil = in-memory only
 	queryLog     QueryLogStore // optional durable query log; nil = not logging
-	backend      string       // vector store name (e.g. "qdrant"), set by main.go
-	writeGuard   *WriteGuard  // optional per-project write contract; nil = no checks
+	backend      string        // vector store name (e.g. "qdrant"), set by main.go
+	writeGuard   *WriteGuard   // optional per-project write contract; nil = no checks
 }
 
 // MetricsStore is an optional durable sink for query metrics, injected into
@@ -334,7 +348,7 @@ func (s *Service) Search(ctx context.Context, projectID, query string, opts Sear
 			lat := latencyMs
 			go func() { _ = s.metricsStore.PersistQueryMetric(context.WithoutCancel(context.Background()), lat, c) }()
 		}
-		if s.queryLog != nil {
+		if s.queryLog != nil && !opts.NoLog {
 			// Same treatment as the metrics persist: asynchronous, and a failure
 			// here must never turn a successful search into an error. A query
 			// the caller already got results for is not going to be retracted

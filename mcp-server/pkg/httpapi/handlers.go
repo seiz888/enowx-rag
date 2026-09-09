@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/enowdev/enowx-rag/pkg/core"
 	"github.com/enowdev/enowx-rag/pkg/rag"
@@ -209,6 +210,21 @@ func (h *Handlers) DeleteProject(w http.ResponseWriter, r *http.Request) {
 // Search handles POST /api/search.
 // Accepts project_id, query, k (alias: limit), recall, hybrid, rerank.
 // Returns 400 for missing fields, 404 for bad project.
+// noLog reports whether the caller asked to be kept out of the query log.
+//
+// A header rather than a body field on purpose: it is a property of the caller,
+// not of the query, so it applies uniformly to /api/search and any other
+// searching endpoint without each one growing a field. Synthetic traffic sets
+// `X-Rag-No-Log: 1`; anything else, including a caller that has never heard of
+// this header, is logged.
+func noLog(r *http.Request) bool {
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get("X-Rag-No-Log"))) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
 func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ProjectID string `json:"project_id"`
@@ -257,6 +273,7 @@ func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 		Hybrid:   req.Hybrid,
 		Rerank:   req.Rerank,
 		Compress: req.Compress,
+		NoLog:    noLog(r),
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
