@@ -135,7 +135,15 @@ func newTestServer(t *testing.T, provider rag.Provider, ui fs.FS) (*core.Service
 	// The admin token is always cleared here; tests that exercise auth set it
 	// *after* this call, which wins since t.Setenv runs later.
 	if os.Getenv("HOME") == realHome {
-		t.Setenv("HOME", t.TempDir())
+		dir := t.TempDir()
+		t.Setenv("HOME", dir)
+		// On Windows os.UserHomeDir reads USERPROFILE, not HOME, so isolating
+		// HOME alone left these tests loading the developer's real
+		// ~/.enowx-rag/config.yaml -- and with an admin token in it every
+		// request got 401. Fourteen tests in this package failed that way on
+		// Windows and passed on Linux, which reads as flakiness rather than as
+		// the environment leak it is.
+		t.Setenv("USERPROFILE", dir)
 	}
 	t.Setenv("RAG_ADMIN_TOKEN", "")
 	svc := core.NewService(provider, nil, nil)

@@ -207,13 +207,14 @@ func (h *Handlers) DeleteProject(w http.ResponseWriter, r *http.Request) {
 }
 
 // Search handles POST /api/search.
-// Accepts project_id, query, k, recall, hybrid, rerank.
+// Accepts project_id, query, k (alias: limit), recall, hybrid, rerank.
 // Returns 400 for missing fields, 404 for bad project.
 func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ProjectID string `json:"project_id"`
 		Query     string `json:"query"`
 		K         int    `json:"k"`
+		Limit     int    `json:"limit"`
 		Recall    int    `json:"recall"`
 		Hybrid    bool   `json:"hybrid"`
 		Rerank    bool   `json:"rerank"`
@@ -227,6 +228,17 @@ func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 	if req.ProjectID == "" || req.Query == "" {
 		writeErr(w, http.StatusBadRequest, "project_id and query are required")
 		return
+	}
+
+	// `limit` is an accepted alias for `k`. The MCP tools name this field
+	// `limit` and this endpoint named it `k`, so a caller that knows one
+	// interface writes the wrong key for the other -- and an unknown JSON key
+	// is dropped in silence, leaving the caller with DefaultK results while
+	// believing a larger k was honoured. That is a bad failure to have to
+	// discover: it does not error, it just quietly returns less. `k` still
+	// wins when both are set, so no existing caller changes behaviour.
+	if req.K == 0 {
+		req.K = req.Limit
 	}
 
 	// Check that the project exists before executing the search. A
