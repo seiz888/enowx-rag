@@ -34,10 +34,11 @@ import (
 // Disabled unless RAG_GUARD_PROJECTS names at least one project, so every other
 // deployment and every other project on this one is unaffected.
 type WriteGuard struct {
-	projects map[string]bool
-	maxChars int
-	required []string
-	enums    map[string][]string
+	projects  map[string]bool
+	maxChars  int
+	maxDelete int
+	required  []string
+	enums     map[string][]string
 }
 
 // WriteGuardFromEnv builds a guard from the environment, or returns nil when
@@ -48,6 +49,7 @@ type WriteGuard struct {
 //	RAG_GUARD_REQUIRE_META  chunk,bucket,kind   meta keys that must be present and non-empty
 //	RAG_GUARD_ENUM_KIND     log,ref             allowed values for meta.kind
 //	RAG_GUARD_ENUM_SOURCE   session,multibrain  allowed values for meta.source
+//	RAG_GUARD_MAX_DELETE    25                  reject a delete of more points than this
 func WriteGuardFromEnv() *WriteGuard {
 	projects := splitList(os.Getenv("RAG_GUARD_PROJECTS"))
 	if len(projects) == 0 {
@@ -64,6 +66,16 @@ func WriteGuardFromEnv() *WriteGuard {
 	if v := os.Getenv("RAG_GUARD_MAX_CHARS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			g.maxChars = n
+		}
+	}
+	// Note the asymmetry with maxChars: an unset value here means the DEFAULT
+	// cap, not "no cap". A guard that silently permits unlimited deletion when
+	// an operator forgets one variable is the failure this exists to prevent.
+	// 0 is accepted and means "no deletes at all".
+	g.maxDelete = DefaultMaxDelete
+	if v := os.Getenv("RAG_GUARD_MAX_DELETE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			g.maxDelete = n
 		}
 	}
 	for _, f := range []string{"kind", "source"} {
@@ -84,7 +96,6 @@ func splitList(s string) []string {
 	return out
 }
 
-// Describe reports the active contract, for the startup log.
 // CheckProjectScan refuses a directory-scan index into a guarded project.
 //
 // Why refuse rather than validate per document: a scan cannot satisfy the
@@ -108,6 +119,55 @@ func (g *WriteGuard) CheckProjectScan(projectID string) error {
 		projectID, strings.Join(g.required, ","))
 }
 
+// DefaultMaxDelete caps how many points one call may remove from a guarded
+// project. Chosen to fit repair work and nothing else: fixing a bad write means
+// deleting the handful of chunks it produced, while any legitimate reshaping of
+// the corpus is a re-chunk that upserts over the same doc_ids rather than
+// deleting them.
+const DefaultMaxDelete = 25
+
+// CheckDeleteProject refuses to drop a guarded project's entire collection.
+//
+// This closes an asymmetry, not a hypothetical: since 2026-09-09 a malformed
+// document is rejected on write, yet DeleteProject and DeletePoints called
+// straight through to the provider with no check at all. So the corpus could not
+// be written badly but could be removed completely -- by one tool call, from any
+// agent holding the bearer. The snapshot chain is proven to restore, but "we can
+// get yesterday back" is a recovery story, not a control.
+//
+// There is deliberately no override flag. Deleting this project is a thing a
+// person should do on the host, with the systemd unit in view, not something an
+// agent can talk its way into mid-session.
+func (g *WriteGuard) CheckDeleteProject(projectID string) error {
+	if g == nil || !g.projects[projectID] {
+		return nil
+	}
+	return fmt.Errorf("write guard: project %q dilindungi -- hapus koleksi "+
+		"ditolak. Kalau memang mau menghapusnya, lakukan di host (lepas "+
+		"%s dari RAG_GUARD_PROJECTS lalu restart), bukan lewat tool call",
+		projectID, projectID)
+}
+
+// CheckDeletePoints caps a bulk point delete on a guarded project.
+//
+// A cap rather than a ban: deleting a few points is how a bad write gets
+// repaired, and forbidding it would push that work onto a project-wide delete or
+// onto nothing at all. What the cap stops is the shape that cannot be repair --
+// one call carrying hundreds of ids, which is either a mistake or a wipe.
+func (g *WriteGuard) CheckDeletePoints(projectID string, n int) error {
+	if g == nil || !g.projects[projectID] {
+		return nil
+	}
+	if n <= g.maxDelete {
+		return nil
+	}
+	return fmt.Errorf("write guard: %d titik dalam satu panggilan hapus di "+
+		"project %q, batas %d. Hapus per bagian kalau ini perbaikan; kalau ini "+
+		"perapian korpus, tulis ulang lewat rag_index dengan doc_id yang sama "+
+		"(upsert) daripada menghapus", n, projectID, g.maxDelete)
+}
+
+// Describe reports the active contract, for the startup log.
 func (g *WriteGuard) Describe() string {
 	if g == nil {
 		return "off"
@@ -117,8 +177,9 @@ func (g *WriteGuard) Describe() string {
 		names = append(names, p)
 	}
 	sort.Strings(names)
-	return fmt.Sprintf("projects=%s max_chars=%d require=%s",
-		strings.Join(names, "+"), g.maxChars, strings.Join(g.required, ","))
+	return fmt.Sprintf("projects=%s max_chars=%d max_delete=%d require=%s",
+		strings.Join(names, "+"), g.maxChars, g.maxDelete,
+		strings.Join(g.required, ","))
 }
 
 // Check returns an error naming every violation, or nil. A nil guard, or a

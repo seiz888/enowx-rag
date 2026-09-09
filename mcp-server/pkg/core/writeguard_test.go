@@ -235,3 +235,79 @@ func TestProjectScanRefusalNamesTheContract(t *testing.T) {
 		}
 	}
 }
+
+// The delete side of the contract. These exist because the write side was
+// enforced for a day while DeleteProject and DeletePoints called straight
+// through to the provider: the corpus could not be written badly but could be
+// removed entirely, by one tool call.
+func TestDeleteProjectRefusedOnGuardedProject(t *testing.T) {
+	t.Setenv("RAG_GUARD_PROJECTS", "memory")
+	g := WriteGuardFromEnv()
+
+	err := g.CheckDeleteProject("memory")
+	if err == nil {
+		t.Fatal("deleting a guarded project must be refused")
+	}
+	// The message has to say what to do instead, or the next agent retries the
+	// same call with a flag it invented.
+	for _, want := range []string{"memory", "host", "RAG_GUARD_PROJECTS"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not mention %q: %s", want, err)
+		}
+	}
+	if err := g.CheckDeleteProject("some-other-project"); err != nil {
+		t.Errorf("an unguarded project must still be deletable: %v", err)
+	}
+	var nilGuard *WriteGuard
+	if err := nilGuard.CheckDeleteProject("memory"); err != nil {
+		t.Errorf("a disabled guard must not block anything: %v", err)
+	}
+}
+
+func TestDeletePointsCappedNotBanned(t *testing.T) {
+	t.Setenv("RAG_GUARD_PROJECTS", "memory")
+	t.Setenv("RAG_GUARD_MAX_DELETE", "")
+	g := WriteGuardFromEnv()
+
+	// Repair-sized deletes must keep working; a wipe-sized one must not.
+	if err := g.CheckDeletePoints("memory", DefaultMaxDelete); err != nil {
+		t.Errorf("%d points is repair work and must pass: %v", DefaultMaxDelete, err)
+	}
+	err := g.CheckDeletePoints("memory", DefaultMaxDelete+1)
+	if err == nil {
+		t.Fatalf("more than %d points must be refused", DefaultMaxDelete)
+	}
+	if !strings.Contains(err.Error(), "rag_index") {
+		t.Errorf("refusal should point at the upsert route instead: %s", err)
+	}
+	if err := g.CheckDeletePoints("other", 100000); err != nil {
+		t.Errorf("unguarded project must be unaffected: %v", err)
+	}
+}
+
+// An unset cap must mean the default, never "unlimited" -- a guard that opens up
+// when an operator forgets one variable is the failure it exists to prevent.
+func TestDeleteCapDefaultsWhenUnset(t *testing.T) {
+	t.Setenv("RAG_GUARD_PROJECTS", "memory")
+	for _, v := range []string{"", "abcd", "-3"} {
+		t.Setenv("RAG_GUARD_MAX_DELETE", v)
+		g := WriteGuardFromEnv()
+		if g.maxDelete != DefaultMaxDelete {
+			t.Errorf("RAG_GUARD_MAX_DELETE=%q gave cap %d, want %d",
+				v, g.maxDelete, DefaultMaxDelete)
+		}
+	}
+	// 0 is a real setting: no deletes at all.
+	t.Setenv("RAG_GUARD_MAX_DELETE", "0")
+	if g := WriteGuardFromEnv(); g.CheckDeletePoints("memory", 1) == nil {
+		t.Error("cap 0 must refuse even a single point")
+	}
+	t.Setenv("RAG_GUARD_MAX_DELETE", "3")
+	g := WriteGuardFromEnv()
+	if err := g.CheckDeletePoints("memory", 3); err != nil {
+		t.Errorf("cap 3 must allow 3: %v", err)
+	}
+	if g.CheckDeletePoints("memory", 4) == nil {
+		t.Error("cap 3 must refuse 4")
+	}
+}

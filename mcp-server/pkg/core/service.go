@@ -607,6 +607,9 @@ func (s *Service) CreateProject(ctx context.Context, projectID string) error {
 
 // DeleteProject deletes the project collection and all its indexed memory.
 func (s *Service) DeleteProject(ctx context.Context, projectID string) error {
+	if err := s.writeGuard.CheckDeleteProject(projectID); err != nil {
+		return err
+	}
 	if err := s.provider.DeleteCollection(ctx, projectID); err != nil {
 		return err
 	}
@@ -665,6 +668,9 @@ func (s *Service) ProjectExists(ctx context.Context, projectID string) bool {
 
 // DeletePoints removes specific points by ID from the project collection.
 func (s *Service) DeletePoints(ctx context.Context, projectID string, pointIDs []string) error {
+	if err := s.writeGuard.CheckDeletePoints(projectID, len(pointIDs)); err != nil {
+		return err
+	}
 	if err := s.provider.DeletePoints(ctx, projectID, pointIDs); err != nil {
 		return err
 	}
