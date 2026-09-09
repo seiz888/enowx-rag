@@ -302,3 +302,33 @@ func (h *Handlers) Stats(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) Metrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.svc.MetricsSnapshot(r.Context()))
 }
+
+// Queries handles GET /api/queries?limit=N and returns the recent query log.
+//
+// 200 with enabled:false when logging is switched off, not 404: the endpoint
+// exists, and "you have not turned this on" is a more useful answer than "no
+// such route", which is what this path returned before the log existed.
+func (h *Handlers) Queries(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	entries, enabled, err := h.svc.RecentQueries(r.Context(), limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if entries == nil {
+		entries = []core.QueryLogEntry{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled": enabled,
+		"count":   len(entries),
+		"queries": entries,
+	})
+}

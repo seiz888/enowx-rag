@@ -85,6 +85,29 @@ func splitList(s string) []string {
 }
 
 // Describe reports the active contract, for the startup log.
+// CheckProjectScan refuses a directory-scan index into a guarded project.
+//
+// Why refuse rather than validate per document: a scan cannot satisfy the
+// contract by construction. It produces chunks whose meta describes a file on
+// disk (`source_file`, offsets) and it has nowhere to get `bucket`, `kind`,
+// `ts`, `agent` or `source` from -- those describe an authored record, not a
+// file. So every document would fail the per-document check anyway; failing
+// once, up front, says why instead of emitting a wall of violations.
+//
+// This closes a real hole rather than a theoretical one: IndexProject writes
+// through indexer.IndexProject, which calls provider.Index directly and never
+// passes through IndexDocuments, so until now the guard on `memory` did not
+// see this path at all.
+func (g *WriteGuard) CheckProjectScan(projectID string) error {
+	if g == nil || !g.projects[projectID] {
+		return nil
+	}
+	return fmt.Errorf("write guard: project %q hanya menerima dokumen ber-meta "+
+		"lengkap (%s); scan direktori tidak bisa menyediakannya -- tulis lewat "+
+		"rag_index setelah dipotong dengan rag_chunk.py",
+		projectID, strings.Join(g.required, ","))
+}
+
 func (g *WriteGuard) Describe() string {
 	if g == nil {
 		return "off"

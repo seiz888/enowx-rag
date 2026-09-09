@@ -266,6 +266,15 @@ func main() {
 		} else {
 			svc.SetMetricsStore(store)
 			defer store.Close()
+
+			// Query logging is opt-in: it is the only thing here that writes
+			// user-authored text to a second place on disk, so it is the
+			// operator's decision, never a default. Same store, separate table.
+			if on, keep := core.QueryLogEnabled(); on {
+				store.SetQueryLogKeep(keep)
+				svc.SetQueryLog(store)
+				log.Printf("query log: on, keeping %d entries at %s", keep, metricsPath)
+			}
 		}
 	}
 

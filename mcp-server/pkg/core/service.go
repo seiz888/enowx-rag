@@ -108,6 +108,7 @@ type Service struct {
 	embedModel   string // optional: set by main.go for stats endpoint
 	metrics      *Metrics
 	metricsStore MetricsStore // optional durable metrics; nil = in-memory only
+	queryLog     QueryLogStore // optional durable query log; nil = not logging
 	backend      string       // vector store name (e.g. "qdrant"), set by main.go
 	writeGuard   *WriteGuard  // optional per-project write contract; nil = no checks
 }
@@ -319,6 +320,25 @@ func (s *Service) Search(ctx context.Context, projectID, query string, opts Sear
 			lat := latencyMs
 			go func() { _ = s.metricsStore.PersistQueryMetric(context.WithoutCancel(context.Background()), lat, c) }()
 		}
+		if s.queryLog != nil {
+			// Same treatment as the metrics persist: asynchronous, and a failure
+			// here must never turn a successful search into an error. A query
+			// the caller already got results for is not going to be retracted
+			// because a log line could not be written.
+			e := QueryLogEntry{
+				Ts:        time.Now(),
+				ProjectID: projectID,
+				Query:     query,
+				Results:   len(out),
+				Reranked:  comp.Reranked,
+				LatencyMs: latencyMs,
+			}
+			if len(out) > 0 {
+				e.TopScore = out[0].Score
+				e.TopDocID = out[0].Meta["doc_id"]
+			}
+			go func() { _ = s.queryLog.LogQuery(context.WithoutCancel(context.Background()), e) }()
+		}
 	}()
 
 	// Publish a query event for SSE listeners.
@@ -429,6 +449,12 @@ func maybeCompress(results []rag.Result, compress bool) []rag.Result {
 // IndexProject scans the given directory and indexes all code/text files
 // into the project collection. Delegates to the indexer.
 func (s *Service) IndexProject(ctx context.Context, projectID, dir string) (*indexer.SyncResult, error) {
+	// Checked before the collection is even touched: a guarded project must not
+	// be reachable from the directory-scan path at all.
+	if err := s.writeGuard.CheckProjectScan(projectID); err != nil {
+		return nil, err
+	}
+
 	s.events.Publish(Event{
 		Type:      "index_started",
 		Timestamp: time.Now(),

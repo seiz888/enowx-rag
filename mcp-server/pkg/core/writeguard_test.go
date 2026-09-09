@@ -199,3 +199,39 @@ func TestDeployedLimitAcceptsRealCorpusMax(t *testing.T) {
 		t.Fatalf("chunk 2558 karakter yang sah ditolak: %v", err)
 	}
 }
+
+// The directory-scan path (IndexProject -> indexer -> provider.Index) never
+// reaches IndexDocuments, so it was unguarded even on a guarded project.
+func TestProjectScanRefusedOnGuardedProject(t *testing.T) {
+	t.Setenv("RAG_GUARD_PROJECTS", "memory")
+	g := WriteGuardFromEnv()
+	if g == nil {
+		t.Fatal("guard should be configured")
+	}
+	if err := g.CheckProjectScan("memory"); err == nil {
+		t.Error("scan into a guarded project should be refused")
+	}
+	if err := g.CheckProjectScan("scratch"); err != nil {
+		t.Errorf("scan into an unguarded project should pass, got %v", err)
+	}
+	var off *WriteGuard
+	if err := off.CheckProjectScan("memory"); err != nil {
+		t.Errorf("a nil guard should allow everything, got %v", err)
+	}
+}
+
+// The refusal has to name the required fields; "rejected" with no reason sends
+// the caller looking through server source to find out what it did wrong.
+func TestProjectScanRefusalNamesTheContract(t *testing.T) {
+	t.Setenv("RAG_GUARD_PROJECTS", "memory")
+	t.Setenv("RAG_GUARD_REQUIRE_META", "chunk,bucket,ts")
+	err := WriteGuardFromEnv().CheckProjectScan("memory")
+	if err == nil {
+		t.Fatal("expected a refusal")
+	}
+	for _, want := range []string{"memory", "chunk,bucket,ts", "rag_chunk.py"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q should mention %q", err.Error(), want)
+		}
+	}
+}

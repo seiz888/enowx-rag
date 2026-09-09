@@ -43,6 +43,7 @@ func NewRouter(svc *core.Service, ui fs.FS, mcpHandler http.Handler) http.Handle
 		r.Post("/search", h.Search)
 		r.Get("/stats", h.Stats)
 		r.Get("/metrics", h.Metrics)
+		r.Get("/queries", h.Queries)
 		r.Get("/events", h.SSE)
 
 		// Setup wizard endpoints. /setup/test and /setup/apply accept
