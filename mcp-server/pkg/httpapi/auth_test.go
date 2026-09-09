@@ -10,7 +10,7 @@ import (
 // (neither RAG_ADMIN_TOKEN nor config.yaml), requests pass through unauthenticated.
 func TestAdminToken_Unset_NoAuth(t *testing.T) {
 	// Isolate from the host: empty HOME means no config token, and clear the env.
-	t.Setenv("HOME", t.TempDir())
+	isolateHome(t, t.TempDir())
 	t.Setenv("RAG_ADMIN_TOKEN", "")
 
 	called := false

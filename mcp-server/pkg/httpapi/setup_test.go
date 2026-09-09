@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -51,7 +52,7 @@ func TestSetupStatus_NotConfigured(t *testing.T) {
 
 	// Point HOME to a temp dir with no config file.
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	p := &mockProvider{}
 	_, router := newTestServer(t, p, nil)
@@ -80,7 +81,7 @@ func TestSetupStatus_Configured(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	// Create the config file so that os.Stat finds it.
 	configDir := filepath.Join(tmpDir, ".enowx-rag")
@@ -119,7 +120,7 @@ func TestSetupStatus_Transitions(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	p := &mockProvider{}
 	_, router := newTestServer(t, p, nil)
@@ -166,7 +167,7 @@ func TestSetupApply_SavesConfigWith0600(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	p := &mockProvider{}
 	_, router := newTestServer(t, p, nil)
@@ -180,6 +181,16 @@ func TestSetupApply_SavesConfigWith0600(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Permission bits are a POSIX concept. Go's os.Chmod on Windows only
+	// toggles the read-only attribute, so Perm() reports 0666 no matter what
+	// mode the code asked for -- the assertion below cannot hold there and
+	// says nothing about the Linux host this config is actually written on.
+	// Skipped rather than loosened: the file carries an admin token, so "0600
+	// on the machine we deploy to" is exactly the guarantee worth keeping.
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode is not enforced by the Windows filesystem")
 	}
 
 	// Verify file exists with 0600 permissions.
@@ -210,7 +221,7 @@ func TestSetupApply_WritesValidYAML(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	p := &mockProvider{}
 	_, router := newTestServer(t, p, nil)
@@ -254,7 +265,7 @@ func TestSetupApply_MissingVectorStore(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	p := &mockProvider{}
 	_, router := newTestServer(t, p, nil)
@@ -301,7 +312,7 @@ func TestSetupApply_OverwritesExisting(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	// Pre-create a config file with different values and wider permissions.
 	configDir := filepath.Join(tmpDir, ".enowx-rag")
@@ -321,6 +332,16 @@ func TestSetupApply_OverwritesExisting(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Permission bits are a POSIX concept. Go's os.Chmod on Windows only
+	// toggles the read-only attribute, so Perm() reports 0666 no matter what
+	// mode the code asked for -- the assertion below cannot hold there and
+	// says nothing about the Linux host this config is actually written on.
+	// Skipped rather than loosened: the file carries an admin token, so "0600
+	// on the machine we deploy to" is exactly the guarantee worth keeping.
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode is not enforced by the Windows filesystem")
 	}
 
 	// Verify file has 0600 permissions even after overwrite.
@@ -717,7 +738,7 @@ func TestInstallMCPEndpoint(t *testing.T) {
 	_, router := newTestServer(t, p, nil)
 	// Set HOME + config AFTER newTestServer (which resets HOME for isolation).
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	isolateHome(t, tmp)
 	// A saved config is required (mcpServerEntry loads it).
 	if err := writeTestConfig(tmp); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -764,7 +785,7 @@ func TestMCPSnippetEndpoint(t *testing.T) {
 	_, router := newTestServer(t, p, nil)
 	// Set HOME + config AFTER newTestServer (which resets HOME for isolation).
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	isolateHome(t, tmp)
 	if err := writeTestConfig(tmp); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -829,7 +850,13 @@ func TestWriteAgentsMD_CreateAndMerge(t *testing.T) {
 	_, router := newTestServer(t, p, nil)
 
 	call := func(projectID string) int {
-		body := `{"dir":"` + dir + `","project_id":"` + projectID + `"}`
+		// json.Marshal, not string concatenation: on Windows `dir` looks like
+		// C:\\Users\\...\\Temp\\Test123, and pasting that between
+		// quotes produces invalid JSON escapes, which the handler correctly
+		// rejects with 400. The endpoint was never broken; the test body was.
+		d, _ := json.Marshal(dir)
+		pid, _ := json.Marshal(projectID)
+		body := `{"dir":` + string(d) + `,"project_id":` + string(pid) + `}`
 		req := httptest.NewRequest(http.MethodPost, "/api/setup/write-agents-md", strings.NewReader(body))
 		req.RemoteAddr = "127.0.0.1:1"
 		w := httptest.NewRecorder()
@@ -870,7 +897,8 @@ func TestWriteAgentsMD_AppendPreservesUserContent(t *testing.T) {
 
 	p := &mockProvider{}
 	_, router := newTestServer(t, p, nil)
-	body := `{"dir":"` + dir + `","project_id":"x"}`
+	d, _ := json.Marshal(dir)
+	body := `{"dir":` + string(d) + `,"project_id":"x"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/setup/write-agents-md", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:1"
 	w := httptest.NewRecorder()
@@ -993,7 +1021,7 @@ func TestMCPMount_Gated(t *testing.T) {
 // TestMCPMount_OpenWhenNoToken verifies /mcp is reachable without auth when no
 // token is set (local use).
 func TestMCPMount_OpenWhenNoToken(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // no config token
+	isolateHome(t, t.TempDir()) // no config token
 	t.Setenv("RAG_ADMIN_TOKEN", "")
 	dummy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	router := NewRouter(core.NewService(&mockProvider{}, nil, nil), nil, dummy)
@@ -1011,7 +1039,7 @@ func TestSetupConfig_Masked(t *testing.T) {
 	_, router := newTestServer(t, p, nil)
 	// Set HOME + write config AFTER newTestServer (which resets HOME for isolation).
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	isolateHome(t, tmp)
 	if err := writeTestConfig(tmp); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -1033,7 +1061,7 @@ func TestSetupConfig_Masked(t *testing.T) {
 // requests (per-request effective token).
 func TestGenToken_SavesAndGates(t *testing.T) {
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+	isolateHome(t, tmp)
 	t.Setenv("RAG_ADMIN_TOKEN", "") // ensure config value is the effective one
 	if err := writeTestConfig(tmp); err != nil {
 		t.Fatalf("write config: %v", err)

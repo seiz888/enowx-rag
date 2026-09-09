@@ -20,9 +20,30 @@ import (
 
 // realHome is the developer's HOME captured before any test mutates the env.
 // newTestServer uses it to tell whether a test has already isolated HOME (by
-// calling t.Setenv("HOME", ...) itself) so it doesn't clobber a test's own
+// calling isolateHome itself) so it doesn't clobber a test's own
 // config directory.
 var realHome = os.Getenv("HOME")
+
+// isolateHome points a test's home directory at dir, in BOTH of the places the
+// code under test may look for it.
+//
+// os.UserHomeDir reads $HOME on unix and %USERPROFILE% on Windows, and
+// config.EffectiveAdminToken loads ~/.enowx-rag/config.yaml through it. Setting
+// only HOME therefore isolates nothing on Windows: the config that gets loaded
+// is the developer's own, and because this machine's config carries an admin
+// token every request in the test came back 401. Sixteen tests in this package
+// failed exactly that way while passing in CI, which reads as flakiness instead
+// of as the environment leak it is -- so the pairing lives in one helper rather
+// than being remembered at seventeen call sites.
+func isolateHome(t *testing.T, dir string) string {
+	t.Helper()
+	if dir == "" {
+		dir = t.TempDir()
+	}
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	return dir
+}
 
 // --- Mock Provider for HTTP handler tests ---
 
@@ -135,15 +156,7 @@ func newTestServer(t *testing.T, provider rag.Provider, ui fs.FS) (*core.Service
 	// The admin token is always cleared here; tests that exercise auth set it
 	// *after* this call, which wins since t.Setenv runs later.
 	if os.Getenv("HOME") == realHome {
-		dir := t.TempDir()
-		t.Setenv("HOME", dir)
-		// On Windows os.UserHomeDir reads USERPROFILE, not HOME, so isolating
-		// HOME alone left these tests loading the developer's real
-		// ~/.enowx-rag/config.yaml -- and with an admin token in it every
-		// request got 401. Fourteen tests in this package failed that way on
-		// Windows and passed on Linux, which reads as flakiness rather than as
-		// the environment leak it is.
-		t.Setenv("USERPROFILE", dir)
+		isolateHome(t, "")
 	}
 	t.Setenv("RAG_ADMIN_TOKEN", "")
 	svc := core.NewService(provider, nil, nil)
@@ -468,7 +481,7 @@ func TestSearch_BadProject(t *testing.T) {
 // when the provider does not implement ProjectLister (falls back to
 // ListPoints returning nil).
 func TestSearch_BadProject_NoLister(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // isolate from host config token
+	isolateHome(t, t.TempDir()) // isolate from host config token
 	t.Setenv("RAG_ADMIN_TOKEN", "")
 	p := &mockProviderNoLister{
 		points: nil, // no points → project doesn't exist
@@ -684,8 +697,8 @@ func TestSPAFallback(t *testing.T) {
 	// Create a test embedded FS
 	distFS := fstestMemFS{
 		files: map[string][]byte{
-			"index.html": []byte("<!DOCTYPE html><html><head><title>SPA</title></head><body>SPA</body></html>"),
-			"assets/app.js": []byte("console.log('app');"),
+			"index.html":       []byte("<!DOCTYPE html><html><head><title>SPA</title></head><body>SPA</body></html>"),
+			"assets/app.js":    []byte("console.log('app');"),
 			"assets/style.css": []byte("body { color: black; }"),
 		},
 	}
@@ -834,7 +847,9 @@ type mockProviderNoLister struct {
 func (m *mockProviderNoLister) CreateCollection(ctx context.Context, projectID string) error {
 	return nil
 }
-func (m *mockProviderNoLister) DeleteCollection(ctx context.Context, projectID string) error { return nil }
+func (m *mockProviderNoLister) DeleteCollection(ctx context.Context, projectID string) error {
+	return nil
+}
 func (m *mockProviderNoLister) Index(ctx context.Context, projectID string, docs []rag.Document) error {
 	return nil
 }

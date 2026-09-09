@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -51,6 +52,25 @@ func helperClearEnv(t *testing.T) func() {
 	}
 }
 
+// isolateHome points the process home directory at dir, in BOTH of the places
+// os.UserHomeDir may read it.
+//
+// os.UserHomeDir reads $HOME on unix and %USERPROFILE% on Windows, and Path()
+// is built from it. Setting only HOME therefore isolates nothing on Windows:
+// Load() went on reading the developer's real ~/.enowx-rag/config.yaml, so ten
+// tests in this package asserted defaults and got that machine's live settings
+// instead. They passed in CI and failed locally, which reads as flakiness
+// rather than as the environment leak it is.
+func isolateHome(t *testing.T, dir string) string {
+	t.Helper()
+	if dir == "" {
+		dir = t.TempDir()
+	}
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	return dir
+}
+
 // --- Path ---
 
 func TestPath(t *testing.T) {
@@ -73,7 +93,7 @@ func TestLoad_NonexistentFile(t *testing.T) {
 
 	// Point HOME to a temp dir with no config file.
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	_, err := Load()
 	if err == nil {
@@ -88,7 +108,7 @@ func TestLoad_ValidYAML(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	// Write a valid config.yaml.
 	configDir := filepath.Join(tmpDir, ".enowx-rag")
@@ -151,7 +171,7 @@ func TestLoad_InvalidYAML(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	configDir := filepath.Join(tmpDir, ".enowx-rag")
 	if err := os.MkdirAll(configDir, 0755); err != nil {
@@ -180,7 +200,7 @@ func TestSave_CreatesDirectoryAndFile(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	cfg := &Config{
 		VectorStore: "pgvector",
@@ -205,6 +225,15 @@ func TestSave_CreatesDirectoryAndFile(t *testing.T) {
 		t.Fatalf("config file not created: %v", err)
 	}
 
+	// Permission bits are a POSIX concept. Go's os.Chmod on Windows only
+	// toggles the read-only attribute, so Perm() reports 0666 whatever mode was
+	// requested. Skipped rather than loosened: this file holds API keys and an
+	// admin token, so 0600 on the Linux host it is deployed to is exactly the
+	// guarantee worth asserting strictly.
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode is not enforced by the Windows filesystem")
+	}
+
 	// Verify permissions are 0600.
 	mode := info.Mode().Perm()
 	if mode != 0600 {
@@ -225,7 +254,7 @@ func TestSave_WritesValidYAML(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	cfg := &Config{
 		VectorStore: "qdrant",
@@ -262,7 +291,7 @@ func TestRoundTrip_SaveThenLoad(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	original := &Config{
 		VectorStore:   "pgvector",
@@ -294,7 +323,7 @@ func TestRoundTrip_SaveThenLoad(t *testing.T) {
 
 func TestEnvVarOverridePriority(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	// Write a config file with specific values.
 	configDir := filepath.Join(tmpDir, ".enowx-rag")
@@ -366,7 +395,7 @@ func TestDefaults_WhenNeitherEnvNorFile(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	// No config file exists, no env vars set.
 	// Load() returns error, but Default() should return default config.
@@ -390,7 +419,7 @@ func TestDefaults_WhenNeitherEnvNorFile(t *testing.T) {
 
 func TestResolve_FullPriority(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	// Write config file.
 	configDir := filepath.Join(tmpDir, ".enowx-rag")
@@ -490,7 +519,7 @@ func TestResolve_VectorDimEnvOverride(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	// Set RAG_VECTOR_DIM env var.
 	dimCleanup := helperSetEnv(t, map[string]string{
@@ -515,7 +544,7 @@ func TestSave_OverwritesExisting(t *testing.T) {
 	defer cleanup()
 
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	isolateHome(t, tmpDir)
 
 	// Save first config.
 	cfg1 := &Config{
