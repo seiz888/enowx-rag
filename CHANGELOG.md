@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Reject credential-shaped content before shared-memory embedding and validate
+  full migration exports before destination mutation.
+- Fail closed on authentication configuration errors; bound search candidates
+  and external point pages, with paginated REST/MCP consumers.
+- Measure complete searches including rerank. Historical retrieval-only metrics
+  remain stored but are excluded from the new latency aggregates; dashboard
+  token counters are explicitly labelled as since server start.
+
 ### Added
+- **Build identity**: the server reports which build is running instead of
+  answering "dev" to everything. `pkg/buildinfo` reads Go's VCS stamp
+  (commit, commit time, dirty tree), a new token-gated `GET /api/version`
+  returns it as JSON, and the same string travels through `enowx-rag
+  version`, the MCP handshake and the startup log. A build from a modified
+  tree reports `dirty_tree: true` and a `-dirty` suffix rather than claiming
+  to be the commit it was based on.
 - **One-line install + prebuilt binaries**: releases now ship cross-compiled,
   CGO-free binaries for macOS/Linux (amd64/arm64) and Windows (amd64) via
   GoReleaser (`.github/workflows/release.yml` on tag `v*`). Install without a

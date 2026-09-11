@@ -160,7 +160,7 @@ func newTestServer(t *testing.T, provider rag.Provider, ui fs.FS) (*core.Service
 	}
 	t.Setenv("RAG_ADMIN_TOKEN", "")
 	svc := core.NewService(provider, nil, nil)
-	return svc, NewRouter(svc, ui, nil)
+	return svc, NewRouter(svc, ui, nil, nil)
 }
 
 // --- Tests ---
@@ -487,7 +487,7 @@ func TestSearch_BadProject_NoLister(t *testing.T) {
 		points: nil, // no points → project doesn't exist
 	}
 	svc := core.NewService(p, nil, nil)
-	router := NewRouter(svc, nil, nil)
+	router := NewRouter(svc, nil, nil, nil)
 
 	body := `{"project_id": "nonexistent", "query": "hello"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/search", strings.NewReader(body))

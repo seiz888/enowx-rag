@@ -26,7 +26,10 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X main.version={{ .Version }}
+      # Keep these in sync with pkg/buildinfo: -X against a symbol that no
+      # longer exists is silently ignored by the linker, so a renamed
+      # variable would quietly ship an unstamped release.
+      - -s -w -X github.com/enowdev/enowx-rag/pkg/buildinfo.version={{ .Version }} -X github.com/enowdev/enowx-rag/pkg/buildinfo.commitSHA={{ .FullCommit }} -X github.com/enowdev/enowx-rag/pkg/buildinfo.buildTime={{ .CommitDate }}
     goos:
       - linux
       - darwin

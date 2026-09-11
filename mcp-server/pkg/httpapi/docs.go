@@ -128,7 +128,7 @@ tier). Either use the **Setup** wizard in the dashboard, or set env vars:
 ## 2. Run
 
 - MCP mode (for your agent): run the binary with no flags.
-- Dashboard: run with ` + "`--serve`" + ` and open the UI.
+- Dashboard: run with `+"`--serve`"+` and open the UI.
 
 Binary: %s
 
@@ -139,14 +139,14 @@ client (Claude Code, Cursor, …), or let an agent do it — see *Agent setup*.
 
 ## 4. Index a project
 
-From your agent call the ` + "`rag_index_project`" + ` MCP tool with the project
+From your agent call the `+"`rag_index_project`"+` MCP tool with the project
 directory, or from the API:
 
     POST %s/api/projects/<PROJECT_ID>/reindex   { "directory": "/abs/path" }
 
 ## 5. Retrieve
 
-Ask your agent to use ` + "`rag_retrieve_context`" + `, or try the **Playground** in
+Ask your agent to use `+"`rag_retrieve_context`"+`, or try the **Playground** in
 the dashboard.`, exe, base)
 }
 
@@ -198,6 +198,7 @@ restricted to localhost or a valid `+"`RAG_ADMIN_TOKEN`"+` bearer token.
 
 ## Stats, metrics, events
 - `+"`GET /api/stats`"+` — totals + embed model
+- `+"`GET /api/version`"+` — running build: version, commit_sha, build_time, dirty_tree
 - `+"`GET /api/metrics`"+` — latency, tokens, backend, persistence (see *Metrics*)
 - `+"`GET /api/events`"+` — SSE stream (index/search/migration events)
 
@@ -258,8 +259,8 @@ func docVectorStores(_, _ string) string {
 func docSearch(_, _ string) string {
 	return "# Search: hybrid, rerank, compress\n\n" +
 		"Options on `POST /api/search` and the search MCP tools.\n\n" +
-		"## Recall vs. K\n`recall` (default 40) candidates are retrieved, then narrowed to `k` " +
-		"(default 5) final results. Reranking works best with recall > k.\n\n" +
+		"## Recall vs. K\n`recall` (default 25) candidates are retrieved, then narrowed to `k` " +
+		"(default 5) final results. Both are capped at 100. Reranking works best with recall > k.\n\n" +
 		"## Hybrid (`hybrid`)\nCombines dense vector similarity with lexical full-text search " +
 		"using Reciprocal Rank Fusion (RRF, k=60). **pgvector only** — other backends fall back to " +
 		"dense. Great for keyword-heavy queries.\n\n" +
@@ -295,13 +296,13 @@ func docMetrics(base, _ string) string {
 		"Every search records metrics, exposed at `GET %s/api/metrics` and shown on the "+
 		"dashboard Overview.\n\n"+
 		"## What's tracked\n"+
-		"- **Latency** — average, p50, p95 over recent queries.\n"+
-		"- **Token usage** — embed + rerank tokens reported by the Voyage API (0 for backends "+
+		"- **Latency** — average, p50, p95 of complete searches including rerank; historical retrieval-only rows are excluded.\n"+
+		"- **Token usage** — embed + rerank tokens since server start, reported by the Voyage API (0 for backends "+
 		"that don't report, e.g. TEI).\n"+
 		"- **Retrieval breakdown** — dense vs. lexical counts on pgvector hybrid searches.\n"+
 		"- **Backend** and **persistent** flag.\n\n"+
-		"## Persistence\nMetrics are stored in a local SQLite file (`~/.enowx-rag/metrics.db`, "+
-		"pure-Go, no external service), so they survive restarts on **any** backend. If the file "+
+		"## Persistence\nQuery counts and latency are stored in a local SQLite file (`~/.enowx-rag/metrics.db`, "+
+		"pure-Go, no external service) and survive restarts on **any** backend; token counters reset on restart. If the file "+
 		"can't be opened, metrics fall back to in-memory (`\"persistent\": false`).", base)
 }
 
@@ -360,10 +361,10 @@ The MCP server binary is: %s
 ### Local vs. remote
 - **Local (default)**: the client spawns the binary above over stdio.
 - **Remote daemon**: to connect to an enowx-rag daemon (running elsewhere with
-  ` + "`enowx-rag --serve`" + `), add ` + "`mode: \"remote\"`" + `, ` + "`remote_url`" + ` (e.g.
-  https://rag.example.com/mcp), and ` + "`token`" + ` (its RAG_ADMIN_TOKEN) to the
-  install-mcp body — or ` + "`?mode=remote&remote_url=...&token=...`" + ` on the snippet.
-  This writes a ` + "`{url, headers: {Authorization}}`" + ` entry instead of a local command.
+  `+"`enowx-rag --serve`"+`), add `+"`mode: \"remote\"`"+`, `+"`remote_url`"+` (e.g.
+  https://rag.example.com/mcp), and `+"`token`"+` (its RAG_ADMIN_TOKEN) to the
+  install-mcp body — or `+"`?mode=remote&remote_url=...&token=...`"+` on the snippet.
+  This writes a `+"`{url, headers: {Authorization}}`"+` entry instead of a local command.
   See the *Remote / daemon* section.
 
 ## 3. Install the skill (skip if skill.installed is true)

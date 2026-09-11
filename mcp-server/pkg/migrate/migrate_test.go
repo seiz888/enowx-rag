@@ -10,10 +10,10 @@ import (
 // fakeProvider is a minimal in-memory rag.Provider for migration tests. As a
 // source it returns exportDocs; as a destination it records Index calls.
 type fakeProvider struct {
-	exportDocs   []rag.Document
-	created      []string
-	indexed      []rag.Document
-	exportErr    error
+	exportDocs []rag.Document
+	created    []string
+	indexed    []rag.Document
+	exportErr  error
 }
 
 func (f *fakeProvider) CreateCollection(ctx context.Context, projectID string) error {
@@ -90,5 +90,25 @@ func TestMigratorNoSource(t *testing.T) {
 	_, err := m.Run(context.Background(), "a", "b", nil)
 	if err == nil {
 		t.Fatal("expected error when source is nil")
+	}
+}
+
+func TestGuardedMigrationRejectsWholeExportBeforeWriting(t *testing.T) {
+	t.Setenv("RAG_GUARD_PROJECTS", "memory")
+	// The last document is deliberately beyond the first batch: no earlier
+	// batch may be embedded before the entire export has passed validation.
+	docs := make([]rag.Document, 65)
+	for i := range docs {
+		docs[i] = rag.Document{ID: "safe", Content: "safe prose"}
+	}
+	docs[64].Content = "password=" + "synthetic" + "-credential"
+	dst := &fakeProvider{}
+	m := &Migrator{Src: &fakeProvider{exportDocs: docs}, Dst: dst, BatchSize: 64}
+	n, err := m.Run(context.Background(), "archive", "memory", nil)
+	if err == nil || n != 0 {
+		t.Fatal("sensitive export was not rejected")
+	}
+	if len(dst.created) != 0 || len(dst.indexed) != 0 {
+		t.Fatal("migration mutated the destination before validating all documents")
 	}
 }

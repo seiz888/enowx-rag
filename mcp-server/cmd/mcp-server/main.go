@@ -8,43 +8,29 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
-	"runtime/debug"
+	"syscall"
 	"time"
 
+	"github.com/enowdev/enowx-rag/pkg/buildinfo"
 	"github.com/enowdev/enowx-rag/pkg/config"
 	"github.com/enowdev/enowx-rag/pkg/core"
 	"github.com/enowdev/enowx-rag/pkg/httpapi"
 	"github.com/enowdev/enowx-rag/pkg/indexer"
+	"github.com/enowdev/enowx-rag/pkg/memgw/gateway"
 	"github.com/enowdev/enowx-rag/pkg/rag"
 	"github.com/enowdev/enowx-rag/pkg/ragbuild"
 	"github.com/enowdev/enowx-rag/web"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// version is the build version. It defaults to "dev" for `go run`/source
-// builds and is overridden at release time via the linker:
-//
-//	-ldflags "-X main.version=v0.1.0"
-//
-// GoReleaser sets it from the git tag. `go install ...@vX.Y.Z` also reports a
-// meaningful version through runtime/debug build info (see resolvedVersion).
-var version = "dev"
-
-// resolvedVersion returns the ldflags-injected version when set, otherwise it
-// falls back to the module version recorded in the binary's build info. That
-// fallback makes `go install github.com/enowdev/enowx-rag/...@v0.1.0` report
-// "v0.1.0" even though it doesn't pass our -ldflags.
+// resolvedVersion returns the identity of the running build: a release version
+// when one was injected, otherwise the short commit SHA, with "-dirty" appended
+// when the working tree was modified. See pkg/buildinfo for where the values
+// come from and why a bare "dev" was not good enough.
 func resolvedVersion() string {
-	if version != "dev" {
-		return version
-	}
-	if info, ok := debug.ReadBuildInfo(); ok {
-		if v := info.Main.Version; v != "" && v != "(devel)" {
-			return v
-		}
-	}
-	return version
+	return buildinfo.String()
 }
 
 // RuntimeConfig holds the resolved configuration used to build the service
@@ -211,6 +197,8 @@ type ListPointsInput struct {
 	ProjectID  string            `json:"project_id" jsonschema:"Project identifier"`
 	SourceFile string            `json:"source_file" jsonschema:"Optional: only list chunks from this source file"`
 	Filter     map[string]string `json:"filter" jsonschema:"Optional exact-match metadata filter, e.g. {\"bucket\":\"trackstat\"} or {\"kind\":\"ref\"}. Combined with source_file when both are given."`
+	Offset     int               `json:"offset" jsonschema:"Optional: number of chunks to skip before the page (default 0). Use with limit to page through large projects."`
+	Limit      int               `json:"limit" jsonschema:"Optional: max chunks in this page (default 100, capped at 500). When more chunks remain, has_more is true and next_offset is set."`
 }
 
 type DeletePointsInput struct {
@@ -224,6 +212,13 @@ func main() {
 	// docker-compose backend from the command line — never over HTTP.
 	if len(os.Args) > 1 && os.Args[1] == "setup" {
 		runSetup(os.Args[2:])
+		return
+	}
+	// `enowx-rag memgw <status|plan|up>` runs the shared memory gateway's SQL
+	// migrations. It is a subcommand, not a startup step: a schema change
+	// should be something someone decided to do, not something a restart did.
+	if len(os.Args) > 1 && os.Args[1] == "memgw" {
+		runMemgw(os.Args[2:])
 		return
 	}
 	// `enowx-rag version` / `--version` / `-v` prints the build version.
@@ -273,11 +268,17 @@ func main() {
 	// vector-store backend. If it can't be opened, fall back to in-memory
 	// metrics rather than failing startup.
 	metricsPath := config.MetricsDBPath()
+	// Held so the HTTP shutdown path can flush it explicitly. The deferred
+	// Close below still runs; closing twice is harmless, and relying on the
+	// defer alone would mean the store closes only after the process has
+	// already decided it shut down cleanly.
+	var metricsStore *core.SQLiteMetricsStore
 	if err := os.MkdirAll(filepath.Dir(metricsPath), 0o700); err == nil {
 		if store, err := core.NewSQLiteMetricsStore(metricsPath); err != nil {
 			fmt.Fprintf(os.Stderr, "metrics: durable store unavailable, using in-memory: %v\n", err)
 		} else {
 			svc.SetMetricsStore(store)
+			metricsStore = store
 			defer store.Close()
 
 			// Query logging is opt-in: it is the only thing here that writes
@@ -292,7 +293,13 @@ func main() {
 	}
 
 	if *serve {
-		runHTTP(svc, *addr, cfg)
+		if err := runHTTP(svc, *addr, cfg, metricsStore); err != nil {
+			// A shutdown that did not finish is reported as a failure: callers
+			// cut off mid-request cannot tell whether their write landed, and
+			// exiting zero would hide that from the supervisor.
+			log.Printf("http server: %v", err)
+			os.Exit(1)
+		}
 		return
 	}
 	runStdio(svc, cfg)
@@ -324,11 +331,11 @@ func runStdio(svc *core.Service, cfg *RuntimeConfig) {
 // runHTTP starts the HTTP API + SPA server on the given address, and also mounts
 // the MCP server over HTTP at /mcp so agents can use enowx-rag as a remote
 // daemon (behind RAG_ADMIN_TOKEN when set).
-func runHTTP(svc *core.Service, addr string, cfg *RuntimeConfig) {
+func runHTTP(svc *core.Service, addr string, cfg *RuntimeConfig, metricsStore *core.SQLiteMetricsStore) error {
 	// Extract the dist subdirectory from the embedded filesystem.
 	distFS, err := fs.Sub(web.Dist, "dist")
 	if err != nil {
-		log.Fatalf("failed to get embedded dist: %v", err)
+		return fmt.Errorf("failed to get embedded dist: %w", err)
 	}
 
 	// MCP over HTTP: one server instance shared across all sessions. Stateless
@@ -339,16 +346,47 @@ func runHTTP(svc *core.Service, addr string, cfg *RuntimeConfig) {
 		&mcp.StreamableHTTPOptions{Stateless: true},
 	)
 
-	handler := httpapi.NewRouter(svc, distFS, mcpHandler)
+	// The memory gateway, when this deployment is configured for one. It opens
+	// its own pool, which is closed on the way out of this function -- after
+	// Serve returns, so the drain still has a ledger to finish its in-flight
+	// writes against.
+	memgwHandler, closeMemgw, err := openMemgwGateway(context.Background())
+	if err != nil {
+		return fmt.Errorf("memgw gateway: %w", err)
+	}
+	defer closeMemgw()
+
+	handler := httpapi.NewRouter(svc, distFS, mcpHandler, memgwHandler)
+
+	// The routes are unchanged. What changes is the server around them: bounded
+	// timeouts, and a shutdown that drains in-flight requests instead of cutting
+	// them. A caller cut mid-request cannot tell whether its write landed.
+	hooks := httpapi.Hooks{
+		FlushMetrics: func(context.Context) error {
+			if metricsStore == nil {
+				return nil
+			}
+			return metricsStore.Close()
+		},
+	}
+	srv := httpapi.NewServer(addr, handler, httpapi.DefaultServerOptions(), hooks)
 
 	authNote := "open (no RAG_ADMIN_TOKEN set)"
 	if os.Getenv("RAG_ADMIN_TOKEN") != "" {
 		authNote = "requires Authorization: Bearer <RAG_ADMIN_TOKEN>"
 	}
-	fmt.Fprintf(os.Stderr, "enowx-rag HTTP server starting on %s: vector_store=%s embedder=%s; MCP at /mcp (%s)\n", addr, cfg.VectorStore, cfg.Embedder, authNote)
-	if err := http.ListenAndServe(addr, handler); err != nil {
-		log.Fatalf("HTTP server error: %v", err)
+	memgwNote := "off (MEMGW_DSN not set)"
+	if memgwHandler != nil {
+		memgwNote = "at " + gateway.MountPath + " (per-principal credential)"
 	}
+	fmt.Fprintf(os.Stderr, "enowx-rag HTTP server starting on %s: vector_store=%s embedder=%s; MCP at /mcp (%s); memgw %s\n",
+		addr, cfg.VectorStore, cfg.Embedder, authNote, memgwNote)
+
+	// SIGINT and SIGTERM start the drain. Anything else -- SIGKILL, a power cut
+	// -- is exactly the crash case the ledger's receipt lookup exists for.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return srv.Serve(ctx)
 }
 
 // registerMCPTools registers all MCP tools on the server, each as a thin
@@ -471,7 +509,7 @@ func registerMCPTools(server *mcp.Server, svc *core.Service) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "rag_list_points",
-		Description: "List indexed chunks in a project (id, source file, content preview, metadata), optionally filtered by source file and/or an exact-match metadata filter. Use to inspect or enumerate what is stored — including agent memory tagged with bucket/kind/ts.",
+		Description: "List indexed chunks in a project (id, source file, content preview, metadata), optionally filtered by source file and/or an exact-match metadata filter. Returns one page at a time (default 100, max 500): when has_more is true, call again with next_offset to continue. Use to inspect or enumerate what is stored — including agent memory tagged with bucket/kind/ts.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in ListPointsInput) (*mcp.CallToolResult, any, error) {
 		filter := map[string]string{}
 		for k, v := range in.Filter {
@@ -480,14 +518,23 @@ func registerMCPTools(server *mcp.Server, svc *core.Service) {
 		if in.SourceFile != "" {
 			filter["source_file"] = in.SourceFile
 		}
-		points, err := svc.ListPoints(ctx, in.ProjectID, filter)
+		limit := in.Limit
+		if limit <= 0 {
+			limit = 100
+		}
+		if limit > 500 {
+			limit = 500
+		}
+		points, err := svc.ListPointsPage(ctx, in.ProjectID, filter, in.Offset, limit)
 		if err != nil {
 			return nil, nil, err
 		}
-		if points == nil {
-			points = []rag.PointInfo{}
+		hasMore := len(points) == limit
+		out := map[string]any{"points": points, "count": len(points), "has_more": hasMore}
+		if hasMore {
+			out["next_offset"] = in.Offset + len(points)
 		}
-		return nil, map[string]any{"points": points, "count": len(points)}, nil
+		return nil, out, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{

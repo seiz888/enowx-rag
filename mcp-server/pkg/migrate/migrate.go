@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/enowdev/enowx-rag/pkg/core"
 	"github.com/enowdev/enowx-rag/pkg/rag"
 )
 
@@ -43,6 +44,9 @@ func (m *Migrator) Run(ctx context.Context, srcProject, dstProject string, onPro
 	}
 	total := len(docs)
 
+	if err := core.WriteGuardFromEnv().Check(dstProject, docs); err != nil {
+		return 0, err
+	}
 	if err := m.Dst.CreateCollection(ctx, dstProject); err != nil {
 		return 0, fmt.Errorf("create destination collection: %w", err)
 	}

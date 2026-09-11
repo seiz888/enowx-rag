@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/enowdev/enowx-rag/pkg/buildinfo"
 	"github.com/enowdev/enowx-rag/pkg/core"
 	"github.com/enowdev/enowx-rag/pkg/rag"
 	"github.com/go-chi/chi/v5"
@@ -31,6 +32,17 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 // NotFound handles unknown /api/ routes with a JSON 404 response.
 func (h *Handlers) NotFound(w http.ResponseWriter, r *http.Request) {
 	writeErr(w, http.StatusNotFound, "API endpoint not found")
+}
+
+// Version handles GET /api/version. It reports which build is running:
+// version, commit SHA, build time, dirty-tree flag and Go toolchain.
+//
+// It sits behind the same admin token as the rest of /api. A commit SHA is not
+// a secret, but it does tell an anonymous caller exactly which source revision
+// an exposed instance is running, and there is no reason to volunteer that.
+// Operators reach it with the token they already hold.
+func (h *Handlers) Version(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, buildinfo.Get())
 }
 
 // ListProjects handles GET /api/projects.
@@ -87,7 +99,8 @@ func (h *Handlers) GetProject(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListPoints handles GET /api/projects/{id}/points.
-// Returns chunks with metadata. Supports ?source_file filter, ?offset, ?limit.
+// Returns chunks with metadata. Supports ?source_file filter, ?offset, ?limit
+// (paged at the provider: only the requested slice is fetched).
 func (h *Handlers) ListPoints(w http.ResponseWriter, r *http.Request) {
 	projectID := chi.URLParam(r, "id")
 	if projectID == "" {
@@ -100,13 +113,6 @@ func (h *Handlers) ListPoints(w http.ResponseWriter, r *http.Request) {
 		metaFilter["source_file"] = sf
 	}
 
-	points, err := h.svc.ListPoints(r.Context(), projectID, metaFilter)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Apply offset/limit pagination if provided.
 	offset := 0
 	limit := 0
 	if v := r.URL.Query().Get("offset"); v != "" {
@@ -120,19 +126,37 @@ func (h *Handlers) ListPoints(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if offset > 0 && offset < len(points) {
-		points = points[offset:]
-	} else if offset >= len(points) {
-		points = nil
-	}
-	if limit > 0 && limit < len(points) {
-		points = points[:limit]
-	}
-
-	if points == nil {
-		points = []rag.PointInfo{}
+	// Paged at the provider: without ?limit the Service default (100, cap 500)
+	// applies; legacy callers that enumerated the full list in one response
+	// must pass an explicit large limit or page by offset.
+	points, err := h.svc.ListPointsPage(r.Context(), projectID, metaFilter, offset, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	writeJSON(w, http.StatusOK, points)
+}
+
+// ExportProject handles GET /api/projects/{id}/export.
+// Returns EVERY point with FULL content and metadata (rag.Document) via the
+// provider's Exporter — an explicit bulk export operation, not a listing, so
+// it is deliberately not paginated and never truncates content. Backups and
+// audits use this; interactive browsing uses /points.
+func (h *Handlers) ExportProject(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "id")
+	if projectID == "" {
+		writeErr(w, http.StatusBadRequest, "project id is required")
+		return
+	}
+	docs, err := h.svc.ExportProject(r.Context(), projectID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if docs == nil {
+		docs = []rag.Document{}
+	}
+	writeJSON(w, http.StatusOK, docs)
 }
 
 // DeletePoint handles DELETE /api/projects/{id}/points/{pointId}.

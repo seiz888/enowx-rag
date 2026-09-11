@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/enowdev/enowx-rag/pkg/core"
+	memgw "github.com/enowdev/enowx-rag/pkg/memgw/gateway"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -17,7 +18,15 @@ import (
 // ui is the embedded filesystem containing the SPA dist (index.html + assets).
 // mcpHandler, when non-nil, is mounted at /mcp so agents can use enowx-rag as a
 // remote MCP server; it is gated by the same RAG_ADMIN_TOKEN as /api.
-func NewRouter(svc *core.Service, ui fs.FS, mcpHandler http.Handler) http.Handler {
+// memgwHandler, when non-nil, is the memory gateway. It is mounted at /memgw
+// and is deliberately NOT inside /api: the /api subtree is gated by
+// AdminTokenMiddleware, which compares one shared token that names no
+// principal, proves no scope, is held by every tool on the machine, and
+// authorises everything when it is unset. The gateway authenticates each
+// caller as a principal instead, and mounting it here would have forced all six
+// agent hosts to hold the shared bearer that per-principal isolation exists to
+// replace.
+func NewRouter(svc *core.Service, ui fs.FS, mcpHandler, memgwHandler http.Handler) http.Handler {
 	h := &Handlers{svc: svc}
 
 	r := chi.NewRouter()
@@ -37,11 +46,13 @@ func NewRouter(svc *core.Service, ui fs.FS, mcpHandler http.Handler) http.Handle
 		r.Get("/projects", h.ListProjects)
 		r.Get("/projects/{id}", h.GetProject)
 		r.Get("/projects/{id}/points", h.ListPoints)
+		r.Get("/projects/{id}/export", h.ExportProject)
 		r.Delete("/projects/{id}/points/{pointId}", h.DeletePoint)
 		r.Post("/projects/{id}/reindex", h.ReindexProject)
 		r.Delete("/projects/{id}", h.DeleteProject)
 		r.Post("/search", h.Search)
 		r.Get("/stats", h.Stats)
+		r.Get("/version", h.Version)
 		r.Get("/metrics", h.Metrics)
 		r.Get("/queries", h.Queries)
 		r.Get("/events", h.SSE)
@@ -92,6 +103,13 @@ func NewRouter(svc *core.Service, ui fs.FS, mcpHandler http.Handler) http.Handle
 			r.Handle("/mcp", mcpHandler)
 			r.Handle("/mcp/*", mcpHandler)
 		})
+	}
+
+	// The memory gateway, with its own authentication. Registered before the
+	// SPA catch-all, which would otherwise swallow /memgw and answer a write
+	// with index.html.
+	if memgwHandler != nil {
+		r.Mount(memgw.MountPath, memgwHandler)
 	}
 
 	// SPA fallback: serve embedded dist files, fall back to index.html

@@ -7,8 +7,16 @@ BINARY := enowx-rag
 MCP_DIR := mcp-server
 WEB_DIR := mcp-server/web
 
-# Go build flags
+# Go build flags. -trimpath keeps absolute source paths out of the binary; it
+# does NOT remove the VCS stamp, which is where pkg/buildinfo gets commit,
+# time and dirty-tree from. Plain `go build` stamps it automatically --
+# `go run` does not, so `go run ./cmd/mcp-server version` prints "dev".
+# Set VERSION=v0.4.0 to stamp a release version on top of the commit.
 GO_FLAGS := -trimpath
+VERSION ?=
+ifneq ($(VERSION),)
+GO_FLAGS += -ldflags "-X github.com/enowdev/enowx-rag/pkg/buildinfo.version=$(VERSION)"
+endif
 
 # web: Build the React SPA into web/dist using npm ci + npm run build.
 # This ensures a clean install of dependencies followed by a production build.
