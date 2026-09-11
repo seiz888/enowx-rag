@@ -25,6 +25,21 @@
       remote service     https://rag.seiz.cloud/api/stats returns 401 without a
                         token (proves the listener is up and auth is not failing
                         open); a 200 without a token is an incident
+      off-host backup    a sealed `axonhub` artefact in the pull's own
+                        destination, at a realistic size, with a manifest that
+                        agrees with the file
+      backup pipeline    the VPS staging unit's result and its timer's state
+      ledger backup      a sealed dump of the canonical ledger (container
+                        memgw-live) whose manifest records a real ledger
+      ledger off-host    the same artefact present on the VPS, root-only, kept
+                        fresh
+
+    Two of these exist because an earlier revision got them wrong. The backup
+    check used to accept any sealed file by mtime, so four 114 KB dumps from a
+    scratch database reported `ok` while the real target failed every run; and
+    the ledger had no backup at all. A control that reports green over a broken
+    pipeline is worse than no control, so both now verify identity, size and
+    provenance rather than presence.
 
     Every check records a row; the script exits non-zero when any check crosses
     its threshold, so a Scheduled Task can be failed visibly rather than only
@@ -176,12 +191,12 @@ try {
 # So the check now reads the manifest each sealed artefact carries, and counts
 # only the production database at a realistic size. Test artefacts cannot pass
 # no matter how fresh they are.
-# Two places hold sealed production dumps: the off-host pull writes to
-# `vps\sealed`, and a manual one-shot transfer left a full-size axonhub dump at
-# the root. Both are real off-host copies, so both count; what does not count is
-# anything smaller than a plausible production dump or belonging to another
-# database.
-$sealedDirs = @('D:\memgw-backups\vps\sealed', 'D:\memgw-backups')
+# Only the scheduled pull's destination counts: `vps\sealed`. A full-size
+# axonhub dump also sits at the root from an earlier one-shot manual transfer,
+# and counting it was worse than useless -- it made the check green while the
+# pipeline it is supposed to monitor had never once succeeded. A production
+# backup check must observe the pipeline, not the leftovers.
+$sealedDirs = @('D:\memgw-backups\vps\sealed')
 $prodDatabase = 'axonhub'
 # The axonhub dump compresses to ~4.7 GB. A gigabyte floor is far above any
 # scratch database (travelya is ~114 KB) and far below the real thing, so it
@@ -229,9 +244,13 @@ if ($prodCandidates.Count -eq 0) {
 } else {
     $newest = $prodCandidates | Sort-Object WriteTime -Descending | Select-Object -First 1
     $age = (Get-Date) - $newest.WriteTime
-    # Provenance must agree with the file it names: a manifest pointing at a
-    # different size is a copy/attribution bug, not a stale backup.
-    $sizeAgrees = ($newest.ManifestBytes -le 0) -or ($newest.ManifestBytes -eq $newest.Bytes)
+    # Provenance must agree with the file it names. The manifest records the
+    # size of the staged `.dump.gz` *before* sealing, and AES-CBC/PKCS7 adds
+    # 1-16 bytes of padding, so an exact match is the wrong test -- a sealed
+    # file may legitimately be up to 16 bytes larger. A mismatch beyond that
+    # window is a copy/attribution bug, not a stale backup.
+    $sizeAgrees = ($newest.ManifestBytes -le 0) -or
+                  ($newest.Bytes -ge $newest.ManifestBytes -and $newest.Bytes -le ($newest.ManifestBytes + 16))
     $desc = "$($newest.Name) ($([math]::Round($newest.Bytes / 1GB, 2))GB, $([int]$age.TotalHours)h old)"
     if (-not $sizeAgrees) {
         Add-Check 'offhost-backup' 'fail' "$desc but its manifest claims $($newest.ManifestBytes) bytes"
@@ -306,6 +325,65 @@ if ($null -eq $newestLedger) {
         Add-Check 'ledger-backup' 'warn' "newest sealed ledger backup is $([int]$age.TotalHours)h old ($desc)"
     } else {
         Add-Check 'ledger-backup' 'ok' "$desc, $toc TOC entries"
+    }
+}
+
+# --- off-host ledger copy (different failure domain) ------------------------
+# The sealed ledger backup above lives on D:, the same workstation as the
+# ledger. A second volume is not a second failure domain. This checks that the
+# copy on the VPS exists and records a plausible ledger (TOC >= 100), so a
+# push that silently stopped is noticed before the workstation is lost rather
+# than after. An SSH failure is a `warn`: not being able to ask is a different
+# fact from the answer being bad, and the local check above still applies.
+$offhostDir = '/opt/rag-backup/memgw-ledger-offhost'
+$offhostWarn = [TimeSpan]::FromHours(36)
+$offhostFail = [TimeSpan]::FromHours(96)
+# One remote script over stdin: `ssh host 'sudo bash -s'` has no quoting to get
+# wrong, and the globbing happens remotely so nothing local has to guess the
+# newest name.
+$offhostScript = @"
+set -u
+newest=`$(ls -1t $offhostDir/memgw-*.dump.dpapi 2>/dev/null | head -n1)
+if [ -z "`$newest" ]; then echo "EMPTY"; exit 0; fi
+echo "name=`$(basename "`$newest")"
+stat -c 'stat=%a %U:%G' "`$newest"
+grep -h '^toc_entries=' "`$newest.manifest" 2>/dev/null || echo "toc_entries=missing"
+"@
+$offhostOut = $offhostScript | & ssh @sshArgs 'sudo bash -s' 2>&1
+$offhostLines = @($offhostOut | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+if ($LASTEXITCODE -ne 0 -and $offhostLines.Count -eq 0) {
+    Add-Check 'ledger-offhost' 'warn' "could not query the VPS copy: $(($offhostLines | Select-Object -First 1))"
+} elseif ($offhostLines.Count -eq 0) {
+    Add-Check 'ledger-offhost' 'fail' "no sealed ledger copy in ${offhostDir} on the VPS"
+} else {
+    $nameLine = ($offhostLines | Where-Object { $_ -match '^name=' } | Select-Object -First 1)
+    $name = if ($nameLine) { $nameLine -replace '^name=', '' } else { '(unnamed)' }
+    $statLine = ($offhostLines | Where-Object { $_ -match '^stat=' } | Select-Object -First 1)
+    $tocLine = ($offhostLines | Where-Object { $_ -match '^toc_entries=\d+' } | Select-Object -First 1)
+    $remoteToc = if ($tocLine) { [int]($tocLine -replace '^toc_entries=', '') } else { $null }
+    # `stat=600 root:root` -> 'root:root'
+    $remotePerm = if ($statLine) { (($statLine -replace '^stat=', '') -split '\s+')[1] } else { '' }
+
+    if ($null -eq $remoteToc) {
+        Add-Check 'ledger-offhost' 'fail' "VPS has $name but no readable manifest beside it"
+    } elseif ($remoteToc -lt 100) {
+        Add-Check 'ledger-offhost' 'fail' "VPS copy $name records only $remoteToc TOC entries"
+    } elseif ($remotePerm -and $remotePerm -ne 'root:root') {
+        Add-Check 'ledger-offhost' 'fail' "VPS copy $name is owned by $remotePerm; expected root:root"
+    } else {
+        # Freshness comes from the local side: the push stamps the log, and the
+        # remote mtime of a copied file is the transfer time, not the backup
+        # time. The newest local sealed artefact is the honest age signal, and
+        # it was measured above.
+        $ageH = if ($newestLedger) { [int](((Get-Date) - $newestLedger.LastWriteTime).TotalHours) } else { 999 }
+        $desc = "$name ($remoteToc TOC entries, $remotePerm)"
+        if ($ageH -ge $offhostFail.TotalHours) {
+            Add-Check 'ledger-offhost' 'fail' "VPS copy is $ageH h behind the newest local backup ($desc)"
+        } elseif ($ageH -ge $offhostWarn.TotalHours) {
+            Add-Check 'ledger-offhost' 'warn' "VPS copy is $ageH h behind the newest local backup ($desc)"
+        } else {
+            Add-Check 'ledger-offhost' 'ok' "$desc, within $ageH h of the local backup"
+        }
     }
 }
 

@@ -56,10 +56,15 @@ $action = New-ScheduledTaskAction `
     -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $script) `
     -WorkingDirectory $root
 
-# Daily at 03:10 local; the VPS stages at 02:40 UTC. Local time here is UTC+7,
-# so 03:10 local is 20:10 UTC the previous day -- which is BEFORE the staging
-# run. Use 11:00 local (04:00 UTC) so the staged dump exists first. At logon
-# covers a machine that was off at the daily time (StartWhenAvailable).
+# Daily at 11:00 local; the VPS stages at 02:40 UTC. Local time here is UTC+7,
+# so 11:00 local is 04:00 UTC, after the staging run. At logon covers a machine
+# that was off at the daily time (StartWhenAvailable).
+#
+# Four hours, not one: the axonhub dump is 5.5 GB and the transfer is over a
+# residential uplink (~5 MB/s measured). Sixty minutes cut it off mid-file --
+# which is why the first attempt died at 0xC000013A, the same code a killed
+# process gets. The pull resumes (`reget`) so even a timeout now costs only the
+# current segment rather than the whole transfer.
 $daily = New-ScheduledTaskTrigger -Daily -At '11:00'
 $logon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 
@@ -68,7 +73,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
     -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 60) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 4) `
     -RestartCount 2 `
     -RestartInterval (New-TimeSpan -Minutes 5)
 

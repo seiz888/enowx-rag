@@ -96,35 +96,83 @@ $failures = 0
 # --- transfer --------------------------------------------------------------
 if (-not $SkipTransfer) {
     Write-Log "pulling $RemoteStage -> $LocalStage"
-    # A single sftp session with a batch of get commands. -p preserves mtimes so
-    # a future incremental pull can skip unchanged files; the dump names carry
-    # the timestamp, so a re-pull of an existing name is idempotent.
-    $batch = @(
-        "lcd `"$LocalStage`""
-        "get -p ${RemoteStage}$($globPrefix)*.dump.gz"
-        "get -p ${RemoteStage}$($globPrefix)*.sha256"
-        # Per-dump manifests, so a sealed artefact carries its OWN provenance
-        # (database, bytes, sha256, taken_at) instead of whichever dump
-        # happened to be newest at seal time.
-        "get -p ${RemoteStage}$($globPrefix)*.dump.gz.manifest"
-    ) -join "`n"
-    if (-not $Database) { $batch += "`nget -p ${RemoteStage}latest.manifest" }
-    $batchFile = Join-Path $env:TEMP "memgw-pull-$([guid]::NewGuid().ToString('N')).txt"
-    Set-Content -LiteralPath $batchFile -Value $batch -Encoding ascii
-    try {
-        $out = & sftp -i $SshKey -o BatchMode=yes -b $batchFile "$VpsUser@$VpsHost" 2>&1
-        $rc = $LASTEXITCODE
-        if ($rc -ne 0) {
-            # sftp returns non-zero when a glob matches nothing, which is normal
-            # on a day with no new dump; only surface it if nothing arrived.
-            Write-Log "sftp exit $rc ($(($out | Select-Object -Last 2) -join ' | '))"
+
+    # The remote list comes first, so a file that is already sealed locally is
+    # never transferred again. Without this, the daily run re-downloaded every
+    # staged dump -- including the 5.5 GB axonhub one -- because the plaintext is
+    # deleted after sealing and `reget` therefore had nothing to resume from.
+    $listScript = "ls -1 $RemoteStage$($globPrefix)*.dump.gz 2>/dev/null || true"
+    $remoteDumps = @(& ssh -i $SshKey -o BatchMode=yes -o ConnectTimeout=15 "$VpsUser@$VpsHost" $listScript 2>$null |
+        ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '\.dump\.gz$' })
+
+    $toFetch = @()
+    foreach ($r in $remoteDumps) {
+        $leaf = Split-Path -Leaf $r
+        # `<db>-<stamp>.dump.gz` -> `<db>-<stamp>.aes`
+        $sealedName = ($leaf -replace '\.dump\.gz$', '.aes')
+        if (Test-Path -LiteralPath (Join-Path $SealedDir $sealedName)) { continue }
+        $toFetch += $leaf
+    }
+
+    if ($toFetch.Count -eq 0) {
+        Write-Log "nothing to fetch: every staged dump is already sealed"
+    } else {
+        Write-Log "fetching $($toFetch.Count) dump(s): $($toFetch -join ', ')"
+        # A single sftp session with a batch of `reget` commands.
+        #
+        # `reget`, not `get`: reget resumes a partial transfer from the byte it
+        # stopped at, so a 5.5 GB pull interrupted by a reboot, a network drop or
+        # a task timeout starts where it left off instead of beginning again.
+        # That is the difference between a transfer that eventually completes
+        # unattended and one that never finishes because it is always restarted.
+        #
+        # Re-running for a file that is already complete is safe: the sha256 the
+        # VPS wrote is re-checked below, so a truncated or continued file that is
+        # not the real dump fails loudly rather than being sealed. `-a` (resume,
+        # append) plus `-p` (preserve mtime) is what makes both true.
+        $batch = @("lcd `"$LocalStage`"")
+        foreach ($leaf in $toFetch) {
+            $batch += "reget -a -p ${RemoteStage}$leaf"
+            $batch += "reget -a -p ${RemoteStage}$leaf.sha256"
+            # Per-dump manifests, so a sealed artefact carries its OWN provenance
+            # (database, bytes, sha256, taken_at) instead of whichever dump
+            # happened to be newest at seal time.
+            $batch += "reget -a -p ${RemoteStage}$leaf.manifest"
         }
-    } finally {
-        Remove-Item -LiteralPath $batchFile -Force -ErrorAction SilentlyContinue
+        if (-not $Database) { $batch += "reget -a -p ${RemoteStage}latest.manifest" }
+        $batch = $batch -join "`n"
+        $batchFile = Join-Path $env:TEMP "memgw-pull-$([guid]::NewGuid().ToString('N')).txt"
+        Set-Content -LiteralPath $batchFile -Value $batch -Encoding ascii
+        try {
+            $out = & sftp -i $SshKey -o BatchMode=yes -b $batchFile "$VpsUser@$VpsHost" 2>&1
+            $rc = $LASTEXITCODE
+            if ($rc -ne 0) {
+                # sftp returns non-zero when a glob matches nothing, which is normal
+                # on a day with no new dump; only surface it if nothing arrived.
+                Write-Log "sftp exit $rc ($(($out | Select-Object -Last 2) -join ' | '))"
+            }
+        } finally {
+            Remove-Item -LiteralPath $batchFile -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
 # --- verify every dump against the checksum the VPS wrote -------------------
+# Anything whose sealed artefact already exists is dropped from the local stage
+# first: it is either a leftover sidecar or an interrupted re-download of a
+# dump that was sealed on an earlier run. Verifying it would report a mismatch
+# for a backup that is already safely sealed, which is noise that trains an
+# operator to ignore the check.
+foreach ($stale in @(Get-ChildItem -LiteralPath $LocalStage -Filter '*.dump.gz*' -ErrorAction SilentlyContinue)) {
+    $base = $stale.Name -replace '\.(dump\.gz)(\.(sha256|manifest))?$', '$1'
+    if ($base -notmatch '\.dump\.gz$') { $base = $stale.Name }
+    $sealedName = ($base -replace '\.dump\.gz$', '.aes')
+    if (Test-Path -LiteralPath (Join-Path $SealedDir $sealedName)) {
+        Remove-Item -LiteralPath $stale.FullName -Force -ErrorAction SilentlyContinue
+        Write-Log "cleared local leftovers for already-sealed $sealedName"
+    }
+}
+
 $dumps = @(Get-ChildItem -LiteralPath $LocalStage -Filter '*.dump.gz' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime)
 if ($dumps.Count -eq 0) {
     Write-Log 'no dumps staged; nothing to seal'
