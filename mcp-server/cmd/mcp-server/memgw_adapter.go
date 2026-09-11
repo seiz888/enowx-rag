@@ -147,6 +147,17 @@ func runAdapterBootstrap(cfg adapter.Config, timeout time.Duration, asContext bo
 	if err != nil {
 		return err
 	}
+	// A resolution that names a project and workspace but no work has no work
+	// to read a checkpoint from. Name the current work the same way the
+	// checkpoint writer does, so a session started in a fresh repo still gets
+	// the handover of the work already under way there.
+	if cfg.Work.WorkID == uuid.Nil && cfg.ProjectID != uuid.Nil && cfg.WorkspaceID != uuid.Nil {
+		ensured, err := adapter.EnsureWork(context.Background(), cfg, token, timeout)
+		if err != nil {
+			return fmt.Errorf("could not name the current work: %w", err)
+		}
+		cfg.Work = adapter.WorkConfig{WorkID: ensured.WorkID, Title: ensured.Title}
+	}
 	body := map[string]any{
 		"project_id": cfg.ProjectID, "workspace_id": cfg.WorkspaceID,
 	}

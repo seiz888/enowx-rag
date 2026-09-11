@@ -241,6 +241,31 @@ func TestCodexAcceptsTheSpellingsItsPayloadMightUse(t *testing.T) {
 	}
 }
 
+func TestCodexDecodesTheRealPascalCaseShape(t *testing.T) {
+	// Codex (>= 0.145) sends hook_event_name in PascalCase ("SessionStart",
+	// "SessionEnd") with `source` for the start reason, per the documented
+	// hook input schema. The older hyphenated spelling is accepted too, but
+	// this pins the shape a live Codex build actually emits.
+	start := mustDecode(t, "codex", map[string]any{
+		"session_id":      "thr_123",
+		"cwd":             "/workspace",
+		"hook_event_name": "SessionStart",
+		"source":          "startup",
+	})
+	if start.Lifecycle != SessionStart || start.ReasonClass != "startup" {
+		t.Fatalf("SessionStart decoded wrong: %+v", start)
+	}
+	end := mustDecode(t, "codex", map[string]any{
+		"session_id":      "thr_123",
+		"cwd":             "/workspace",
+		"hook_event_name": "SessionEnd",
+		"reason":          "other",
+	})
+	if end.Lifecycle != SessionEnd {
+		t.Fatalf("SessionEnd decoded wrong: %+v", end)
+	}
+}
+
 func TestAnUnknownHostIsRefused(t *testing.T) {
 	if _, err := Decode("cursor", []byte(`{}`)); err == nil {
 		t.Fatal("an unknown host was accepted")

@@ -141,6 +141,7 @@ type codexHook struct {
 	Cwd           string `json:"cwd"`
 	Reason        string `json:"reason"`
 	Trigger       string `json:"trigger"`
+	Source        string `json:"source"`
 }
 
 func decodeCodex(raw []byte) (Hook, error) {
@@ -157,18 +158,21 @@ func decodeCodex(raw []byte) (Hook, error) {
 		SessionID: firstNonEmpty(c.SessionID, c.SessionIDAlt),
 		Cwd:       c.Cwd,
 	}
-	// Codex spells its events with hyphens. Normalising underscores too costs
-	// one line and removes a class of failure that would otherwise be invisible
-	// until a release renamed them.
-	switch strings.ReplaceAll(name, "_", "-") {
-	case "session-start":
+	// Codex spells its hook_event_name in PascalCase ("SessionStart",
+	// "SessionEnd"); older builds wrote hyphens ("session-start"). Both are
+	// normalised to one kebab token so a release that changed the casing does
+	// not silently start dropping every event into Ignored.
+	switch strings.ToLower(strings.ReplaceAll(name, "_", "-")) {
+	case "sessionstart", "session-start":
 		h.Lifecycle = SessionStart
-		h.ReasonClass = reasonClass(c.Reason)
-	case "pre-compact":
+		// SessionStart carries `source` (startup|resume|clear|compact), not
+		// `reason`.
+		h.ReasonClass = reasonClass(firstNonEmpty(c.Source, c.Reason))
+	case "precompact", "pre-compact":
 		h.Lifecycle = SessionCompact
 		h.ReasonClass = reasonClass(c.Trigger)
 		h.Discriminator = discriminator("trigger", c.Trigger)
-	case "session-end":
+	case "sessionend", "session-end":
 		h.Lifecycle = SessionEnd
 		h.ReasonClass = reasonClass(c.Reason)
 	default:

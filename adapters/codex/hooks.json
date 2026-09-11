@@ -1,13 +1,26 @@
 {
   "hooks": {
-    "session-start": [
-      { "type": "command", "command": "enowx-rag memgw adapter --host codex" }
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          { "type": "command", "command": "enowx-rag memgw adapter --host codex" }
+        ]
+      }
     ],
-    "pre-compact": [
-      { "type": "command", "command": "enowx-rag memgw adapter --host codex" }
+    "PreCompact": [
+      {
+        "hooks": [
+          { "type": "command", "command": "enowx-rag memgw adapter --host codex" }
+        ]
+      }
     ],
-    "session-end": [
-      { "type": "command", "command": "enowx-rag memgw adapter --host codex" }
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "enowx-rag memgw adapter --host codex" }
+        ]
+      }
     ]
   }
 }
