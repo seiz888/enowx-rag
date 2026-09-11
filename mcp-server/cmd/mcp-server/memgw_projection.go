@@ -35,8 +35,11 @@ func runMemgwProjection(args []string) {
 	qdrantURL := fs.String("qdrant", strings.TrimSpace(os.Getenv("RAG_QDRANT_URL")),
 		"Qdrant REST endpoint (default $RAG_QDRANT_URL)")
 	embedder := fs.String("embedder", "",
-		`which embedder to use: "tei" for a real model, "fixture" for deterministic vectors with no semantic content`)
+		`which embedder computes the vectors: "voyage" (the approved hosted model, needs RAG_VOYAGE_API_KEY), "tei" for a local model, "fixture" for deterministic vectors with NO semantic content (tests only)`)
 	teiURL := fs.String("tei-url", strings.TrimSpace(os.Getenv("RAG_TEI_URL")), "TEI endpoint when --embedder=tei")
+	voyageModel := fs.String("voyage-model", strings.TrimSpace(os.Getenv("RAG_VOYAGE_MODEL")),
+		"Voyage model when --embedder=voyage (default voyage-4)")
+	voyageDim := fs.Int("voyage-dim", 0, "Voyage output dimension when --embedder=voyage (0 = model default)")
 	owner := fs.String("owner", defaultOwner(), "lease owner recorded on claimed rows")
 	batch := fs.Int("batch", 16, "rows claimed per batch")
 	lease := fs.Duration("lease", 30*time.Second, "how long a claimed row is held before another worker may take it")
@@ -94,7 +97,7 @@ Flags:
 		fmt.Fprintln(os.Stderr, "memgw projection: --qdrant (or RAG_QDRANT_URL) is not set; the worker never guesses a store")
 		os.Exit(2)
 	}
-	embed, err := chooseEmbedder(*embedder, *teiURL)
+	embed, err := chooseEmbedder(*embedder, *teiURL, *voyageModel, *voyageDim)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "memgw projection: %v\n", err)
 		os.Exit(2)
@@ -135,17 +138,29 @@ Flags:
 // collection with no semantic content and look exactly like a real one -- or
 // TEI, which would silently start sending content to whatever is at that URL.
 // Neither is a decision this command should make on somebody's behalf.
-func chooseEmbedder(kind, teiURL string) (rag.EmbeddingClient, error) {
+func chooseEmbedder(kind, teiURL, voyageModel string, voyageDim int) (rag.EmbeddingClient, error) {
 	switch kind {
 	case "fixture":
 		return projection.NewFixtureEmbedder(384), nil
+	case "voyage":
+		// The same approved embedding path the RAG service already uses. The
+		// key is read from the environment (RAG_VOYAGE_API_KEY), never from a
+		// flag, so it cannot appear in a command line or the process list.
+		key := strings.TrimSpace(os.Getenv("RAG_VOYAGE_API_KEY"))
+		if key == "" {
+			return nil, fmt.Errorf("--embedder=voyage needs RAG_VOYAGE_API_KEY in the environment")
+		}
+		if voyageModel == "" {
+			voyageModel = "voyage-4"
+		}
+		return rag.NewVoyageEmbeddingClient(key, voyageModel, voyageDim), nil
 	case "tei":
 		if strings.TrimSpace(teiURL) == "" {
 			return nil, fmt.Errorf("--embedder=tei needs --tei-url (or RAG_TEI_URL)")
 		}
 		return rag.NewTEIEmbeddingClient(teiURL), nil
 	case "":
-		return nil, fmt.Errorf("--embedder is required: \"tei\" sends content to an embedding service, \"fixture\" produces deterministic vectors with no semantic meaning")
+		return nil, fmt.Errorf("--embedder is required: \"voyage\" uses the approved hosted model, \"tei\" a local model, \"fixture\" deterministic vectors with no semantic meaning (tests only)")
 	default:
 		return nil, fmt.Errorf("unknown embedder %q", kind)
 	}
