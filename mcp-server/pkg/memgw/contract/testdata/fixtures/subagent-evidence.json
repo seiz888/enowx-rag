@@ -1,0 +1,66 @@
+{
+  "fixture": "subagent-evidence",
+  "title": "A subagent contributes evidence but cannot move the parent work",
+  "invariants": ["INV-16"],
+  "narrative": "A subagent spawned by the OMP session records what it found. That evidence is linked to the parent work. Its attempt to mark the work completed is refused: a subagent's conclusion is input to the parent, not a state transition.",
+  "principals": [
+    {"principal_id": "55555555-5555-4555-8555-555555555555", "principal_type": "agent", "agent_id": "omp", "roles": ["checkpoint_write", "work_read"]},
+    {"principal_id": "5a5a5a5a-0001-4a5a-8a5a-5a5a5a5a5a5a", "principal_type": "subagent", "agent_id": "omp", "parent_principal_id": "55555555-5555-4555-8555-555555555555", "roles": ["work_read"]}
+  ],
+  "given": {
+    "work": {"work_id": "33333333-3333-4333-8333-333333333333", "state": "active", "revision": 40}
+  },
+  "steps": [
+    {
+      "name": "subagent-records-evidence",
+      "submit": {
+        "event_id": "5a000001-0000-4000-8000-000000000001",
+        "idempotency_key": "omp-sub:sess-1:evidence:0001",
+        "principal_id": "5a5a5a5a-0001-4a5a-8a5a-5a5a5a5a5a5a",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "work_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "omp:host-a:sess-1:sub-2",
+        "branch_id": "44444444-4444-4444-8444-444444444444",
+        "event_type": "evidence.recorded",
+        "payload": {"evidence_type": "file_digest", "evidence_class": "observed", "locator": "sha256:9c31", "note_class": "search_result"},
+        "payload_digest": "@computed",
+        "evidence_refs": [],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T19:00:00Z"
+      },
+      "expect": {"outcome": "committed", "receipt_state": "committed", "effect": "none", "resulting_revision": 40}
+    },
+    {
+      "name": "subagent-tries-to-complete-parent-work",
+      "submit": {
+        "event_id": "5a000002-0000-4000-8000-000000000002",
+        "idempotency_key": "omp-sub:sess-1:complete:0001",
+        "principal_id": "5a5a5a5a-0001-4a5a-8a5a-5a5a5a5a5a5a",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "work_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "omp:host-a:sess-1:sub-2",
+        "branch_id": "44444444-4444-4444-8444-444444444444",
+        "event_type": "work.completed",
+        "payload": {"reason_class": "subagent_believes_done"},
+        "payload_digest": "@computed",
+        "expected_revision": 40,
+        "evidence_refs": ["5a000001-0000-4000-8000-000000000001"],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T19:01:00Z"
+      },
+      "expect": {"outcome": "rejected", "error_class": "scope_denied", "effect": "none", "resulting_revision": 40}
+    }
+  ],
+  "assertions": [
+    "The subagent's evidence is retained and linked to the parent work; it is not discarded.",
+    "The parent principal may cite that evidence when it advances the work itself.",
+    "If the parent session dies before citing it, the evidence remains non-authoritative rather than becoming state.",
+    "evidence_class observed requires a captured result; an agent's assertion would be recorded as asserted."
+  ]
+}

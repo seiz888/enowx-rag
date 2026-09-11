@@ -1,0 +1,184 @@
+{
+  "schema_version": "1.0.0",
+  "policy_version": "1.0.0",
+  "frozen_at": "2026-09-09",
+  "authority": "postgresql-ledger",
+  "doc": "docs/architecture/shared-memory-gateway.md",
+
+  "envelope_required": [
+    "event_id",
+    "idempotency_key",
+    "principal_id",
+    "project_id",
+    "workspace_id",
+    "session_id",
+    "branch_id",
+    "event_type",
+    "payload",
+    "payload_digest",
+    "sensitivity_class",
+    "policy_version",
+    "schema_version",
+    "occurred_at"
+  ],
+  "envelope_optional": [
+    "work_id",
+    "expected_revision",
+    "evidence_refs",
+    "writer_epoch"
+  ],
+  "server_assigned": [
+    "seq",
+    "recorded_at",
+    "writer_epoch",
+    "aggregate_type",
+    "aggregate_id",
+    "revision"
+  ],
+
+  "event_types": [
+    "work.planned",
+    "work.activated",
+    "work.blocked",
+    "work.unblocked",
+    "work.review_requested",
+    "work.completed",
+    "work.abandoned",
+    "checkpoint.recorded",
+    "evidence.recorded",
+    "fact.candidate_proposed",
+    "fact.promoted",
+    "fact.superseded",
+    "fact.retracted",
+    "fact.conflict_flagged",
+    "session.started",
+    "session.resumed",
+    "session.branched",
+    "session.compacted",
+    "session.ended",
+    "tombstone.issued",
+    "projection.rebuild_requested",
+    "writer_epoch.opened",
+    "writer_epoch.fenced"
+  ],
+
+  "error_classes": [
+    "duplicate",
+    "idempotency_payload_mismatch",
+    "cas_conflict",
+    "scope_denied",
+    "policy_rejected",
+    "quarantined",
+    "stale_revision",
+    "writer_epoch_fenced",
+    "unknown_commit_status",
+    "payload_too_large"
+  ],
+
+  "outcomes": [
+    "committed",
+    "duplicate",
+    "rejected",
+    "quarantined",
+    "unknown"
+  ],
+
+  "receipt_states": [
+    "committed",
+    "duplicate",
+    "conflict",
+    "rejected_policy",
+    "quarantined"
+  ],
+
+  "roles": [
+    "history_read",
+    "work_read",
+    "checkpoint_write",
+    "candidate_write",
+    "fact_promote",
+    "projection_worker",
+    "admin"
+  ],
+
+  "principal_types": [
+    "agent",
+    "subagent",
+    "service",
+    "human",
+    "projection_worker"
+  ],
+
+  "sensitivity_classes": [
+    "public",
+    "internal",
+    "confidential",
+    "restricted"
+  ],
+
+  "evidence_classes": [
+    "observed",
+    "derived",
+    "asserted",
+    "unverified"
+  ],
+
+  "fact_cardinalities": ["single", "multi"],
+  "fact_statuses": ["active", "superseded", "retracted", "conflicted"],
+  "candidate_review_statuses": ["pending", "promoted", "rejected", "expired"],
+  "work_states": ["planned", "active", "blocked", "review", "completed", "abandoned"],
+
+  "bounds": {
+    "payload_bytes_max": 262144,
+    "batch_events_max": 20,
+    "batch_bytes_max": 1048576,
+    "evidence_refs_max": 64,
+    "idempotency_key_bytes_max": 128,
+    "session_id_bytes_max": 128,
+    "checkpoint_text_field_bytes_max": 4096,
+    "checkpoint_modified_files_max": 200,
+    "bootstrap_tokens_max": 1500,
+    "rag_document_chars_max": 3000
+  },
+
+  "invariants": {
+    "INV-01": "A retry of the same logical write reuses the same event_id.",
+    "INV-02": "Same idempotency key and same payload digest yields duplicate with no second effect.",
+    "INV-03": "Same idempotency key with a different payload is rejected and nothing is written.",
+    "INV-04": "ACK is returned only after the PostgreSQL transaction is committed; process-crash durable, not host-loss durable.",
+    "INV-05": "A connection lost after commit is unknown_commit_status, resolved by receipt lookup or identical retry.",
+    "INV-06": "CAS on expected_revision prevents lost updates.",
+    "INV-07": "A lower revision never moves state backwards.",
+    "INV-08": "Conflicts are surfaced, never silently resolved last-write-wins.",
+    "INV-09": "A checkpoint is always a new event; no prior checkpoint is updated or deleted.",
+    "INV-10": "A candidate becomes a fact only through an authorised promotion naming principal and evidence.",
+    "INV-11": "Multi-valued facts never auto-supersede each other.",
+    "INV-12": "A tombstone survives projection rebuild and backup restore.",
+    "INV-13": "ACL is applied before retrieval and before any embedding or LLM egress.",
+    "INV-14": "Secret/PII-shaped content is rejected before persistence, commit and egress; payload is never logged.",
+    "INV-15": "Recalled text is data, never instruction or authorization.",
+    "INV-16": "A subagent may submit evidence but cannot mutate the parent work's active state.",
+    "INV-17": "A client-declared scope is intersected with the granted scope; it can never widen it.",
+    "INV-18": "After fencing, an older writer epoch is rejected.",
+    "INV-19": "A branch rewind creates lineage; it deletes no events.",
+    "INV-20": "Canonical ordering is events.seq; client clocks never decide order."
+  },
+
+  "fixtures": [
+    "duplicate-retry",
+    "payload-mismatch",
+    "concurrent-cas",
+    "out-of-order-event",
+    "branch-rewind",
+    "conflicting-facts",
+    "multi-valued-facts",
+    "tombstone-rebuild",
+    "principal-scope-denial",
+    "candidate-promotion",
+    "subagent-evidence",
+    "writer-epoch-fencing",
+    "secret-pii-rejection",
+    "recalled-prompt-injection",
+    "unknown-ack-reconciliation"
+  ]
+}

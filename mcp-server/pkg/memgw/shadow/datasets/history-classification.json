@@ -1,0 +1,177 @@
+{
+  "dataset_version": "memgw-shadow-dataset/1",
+  "name": "history-classification-and-retrieval-1",
+  "frozen_at": "2026-09-10T00:25:16.3276187Z",
+  "thresholds": {
+    "min_correctness": 1,
+    "min_recall_at_k": 0.8,
+    "k": 5
+  },
+  "cases": [
+    {
+      "id": "cls-import-plain",
+      "lane": "correctness",
+      "record": {
+        "chunk_id": "a1",
+        "rag_project": "memory",
+        "document_id": "session-2026-08-04",
+        "text": "a note recorded during a session"
+      },
+      "expect": {
+        "decision": "imported",
+        "reason": "record is complete and not yet mapped"
+      }
+    },
+    {
+      "id": "cls-import-derived-document",
+      "lane": "correctness",
+      "record": {
+        "chunk_id": "a2",
+        "rag_project": "memory",
+        "text": "a chunk that never carried a document id"
+      },
+      "expect": {
+        "decision": "imported",
+        "reason": "record is complete and not yet mapped"
+      }
+    },
+    {
+      "id": "cls-candidate-fact-shaped",
+      "lane": "correctness",
+      "record": {
+        "chunk_id": "a3",
+        "rag_project": "memory",
+        "document_id": "session-2026-08-11",
+        "text": "decision: we always write lifecycle events through the collector"
+      },
+      "expect": {
+        "decision": "imported",
+        "reason": "the record looks like a durable claim; a migration may not promote it, so it is listed as a candidate for review",
+        "candidate": true
+      }
+    },
+    {
+      "id": "cls-quarantine-credential",
+      "lane": "correctness",
+      "record": {
+        "chunk_id": "a4",
+        "rag_project": "memory",
+        "document_id": "ops",
+        "text": "the example file still has api_key = fixture-placeholder-value in it"
+      },
+      "expect": {
+        "decision": "quarantined",
+        "reason": "the record matched a credential pattern and must be reviewed before anything is written"
+      }
+    },
+    {
+      "id": "cls-quarantine-private-key-banner",
+      "lane": "correctness",
+      "record": {
+        "chunk_id": "a5",
+        "rag_project": "memory",
+        "document_id": "ops",
+        "text": "the transcript pasted a block beginning -----BEGIN OPENSSH PRIVATE KEY----- and continuing"
+      },
+      "expect": {
+        "decision": "quarantined",
+        "reason": "the record matched a credential pattern and must be reviewed before anything is written"
+      }
+    },
+    {
+      "id": "cls-quarantine-unknown-sensitivity",
+      "lane": "correctness",
+      "record": {
+        "chunk_id": "a6",
+        "rag_project": "memory",
+        "document_id": "ops",
+        "sensitivity": "top-secret",
+        "text": "a class the contract does not define"
+      },
+      "expect": {
+        "decision": "quarantined",
+        "reason": "the record claims a sensitivity class that is not in the contract"
+      }
+    },
+    {
+      "id": "cls-reject-no-chunk-id",
+      "lane": "correctness",
+      "record": {
+        "chunk_id": "",
+        "rag_project": "memory",
+        "document_id": "ops",
+        "text": "an export line that lost its id"
+      },
+      "expect": {
+        "decision": "rejected",
+        "reason": "the record has no chunk id"
+      }
+    },
+    {
+      "id": "cls-reject-no-project",
+      "lane": "correctness",
+      "record": {
+        "chunk_id": "a8",
+        "rag_project": "",
+        "document_id": "ops",
+        "text": "a record with no rag project"
+      },
+      "expect": {
+        "decision": "rejected",
+        "reason": "the record names no rag project"
+      }
+    },
+    {
+      "id": "cls-reject-bad-digest",
+      "lane": "correctness",
+      "record": {
+        "chunk_id": "a9",
+        "rag_project": "memory",
+        "document_id": "ops",
+        "source_digest": "not-a-sha256",
+        "text": "a digest that is not a digest"
+      },
+      "expect": {
+        "decision": "rejected",
+        "reason": "the record's source digest is not a sha256"
+      }
+    },
+    {
+      "id": "cls-reject-empty-record",
+      "lane": "correctness",
+      "record": {
+        "chunk_id": "a10",
+        "rag_project": "memory"
+      },
+      "expect": {
+        "decision": "rejected",
+        "reason": "the record's source digest is not a sha256"
+      }
+    },
+    {
+      "id": "ret-runbook",
+      "lane": "retrieval",
+      "query": "where is the collector recovery runbook",
+      "relevant": [
+        "docs/plans/shared-memory-gateway-implementation.md"
+      ]
+    },
+    {
+      "id": "ret-fencing",
+      "lane": "retrieval",
+      "query": "what happens when a writer reconnects with an old epoch",
+      "relevant": [
+        "docs/architecture/shared-memory-gateway.md"
+      ]
+    },
+    {
+      "id": "ret-quarantine",
+      "lane": "retrieval",
+      "query": "how do I release a quarantined row from the collector spool",
+      "relevant": [
+        "docs/plans/shared-memory-gateway-implementation.md"
+      ]
+    }
+  ],
+  "digest": "ec1e1f9801cbb345c90de31e372ec6e4dc0d9c036f449e878967118d0d6204d0"
+}

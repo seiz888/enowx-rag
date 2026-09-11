@@ -1,0 +1,76 @@
+{
+  "fixture": "unknown-ack-reconciliation",
+  "title": "A lost response is reconciled by receipt lookup, not by guessing",
+  "invariants": ["INV-04", "INV-05"],
+  "narrative": "The ledger commits and the connection drops before the response is delivered. The client is in unknown_commit_status: it knows neither that the write landed nor that it did not. It resolves this by looking up the receipt for its own idempotency key, or by retrying the identical event. Both paths converge on one commit.",
+  "principals": [
+    {"principal_id": "55555555-5555-4555-8555-555555555555", "principal_type": "agent", "agent_id": "omp", "roles": ["checkpoint_write", "work_read"]}
+  ],
+  "given": {
+    "work": {"work_id": "33333333-3333-4333-8333-333333333333", "state": "active", "revision": 50},
+    "durability": "synchronous_commit=on; ACK is emitted after the WAL flush of the committing transaction"
+  },
+  "steps": [
+    {
+      "name": "commit-then-connection-lost",
+      "submit": {
+        "event_id": "ac000001-0000-4000-8000-000000000001",
+        "idempotency_key": "omp:sess-5:ckpt:0050",
+        "principal_id": "55555555-5555-4555-8555-555555555555",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "work_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "omp:host-a:sess-5",
+        "branch_id": "44444444-4444-4444-8444-444444444444",
+        "event_type": "checkpoint.recorded",
+        "payload": {"objective": "hand off before shutdown", "next_safe_action": "resume from this checkpoint", "blockers": []},
+        "payload_digest": "@computed",
+        "expected_revision": 50,
+        "evidence_refs": [],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T23:00:00Z"
+      },
+      "transport": {"server_committed": true, "response_delivered": false},
+      "expect": {"outcome": "unknown", "error_class": "unknown_commit_status", "effect": "state_advanced", "client_state": "unknown_commit_status", "server_receipt_state": "committed", "resulting_revision": 51}
+    },
+    {
+      "name": "receipt-lookup",
+      "operation": "receipt_lookup",
+      "actor": "55555555-5555-4555-8555-555555555555",
+      "request": {"idempotency_key": "omp:sess-5:ckpt:0050"},
+      "expect": {"outcome": "committed", "receipt_state": "committed", "effect": "none", "resulting_revision": 51}
+    },
+    {
+      "name": "identical-retry-instead-of-lookup",
+      "submit": {
+        "event_id": "ac000001-0000-4000-8000-000000000001",
+        "idempotency_key": "omp:sess-5:ckpt:0050",
+        "principal_id": "55555555-5555-4555-8555-555555555555",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "work_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "omp:host-a:sess-5",
+        "branch_id": "44444444-4444-4444-8444-444444444444",
+        "event_type": "checkpoint.recorded",
+        "payload": {"objective": "hand off before shutdown", "next_safe_action": "resume from this checkpoint", "blockers": []},
+        "payload_digest": "@computed",
+        "expected_revision": 50,
+        "evidence_refs": [],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T23:00:30Z"
+      },
+      "expect": {"outcome": "duplicate", "receipt_state": "duplicate", "effect": "none", "resulting_revision": 51}
+    }
+  ],
+  "digest_relation": {"equal": [["commit-then-connection-lost", "identical-retry-instead-of-lookup"]]},
+  "assertions": [
+    "unknown is a client-side state only; the server always knows, and the receipt is how the client asks.",
+    "The retry must not allocate a new idempotency key; a new key would commit a second checkpoint.",
+    "A queued outbox entry is not a receipt: locally_queued never means committed.",
+    "An ACK proves the transaction committed and was WAL-flushed. It does not promise survival of host or disk loss; with archive_mode off and no off-host backup, that loss class is currently unmitigated."
+  ]
+}

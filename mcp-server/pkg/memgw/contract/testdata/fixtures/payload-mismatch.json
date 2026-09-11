@@ -1,0 +1,43 @@
+{
+  "fixture": "payload-mismatch",
+  "title": "Same idempotency key with a different payload is refused",
+  "invariants": ["INV-03"],
+  "narrative": "An adapter bug reuses a spent idempotency key for different content. Accepting it would silently overwrite the meaning of a committed write, so it is refused and nothing is written.",
+  "principals": [
+    {"principal_id": "55555555-5555-4555-8555-555555555555", "principal_type": "agent", "agent_id": "omp", "roles": ["checkpoint_write"]}
+  ],
+  "given": {
+    "committed": {"idempotency_key": "omp:sess-1:ckpt:0007", "event_id": "aaaaaaaa-0001-4000-8000-000000000001"},
+    "work": {"work_id": "33333333-3333-4333-8333-333333333333", "state": "active", "revision": 8}
+  },
+  "steps": [
+    {
+      "name": "reuse-key-different-payload",
+      "submit": {
+        "event_id": "aaaaaaaa-0002-4000-8000-000000000002",
+        "idempotency_key": "omp:sess-1:ckpt:0007",
+        "principal_id": "55555555-5555-4555-8555-555555555555",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "work_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "omp:host-a:sess-1",
+        "branch_id": "44444444-4444-4444-8444-444444444444",
+        "event_type": "checkpoint.recorded",
+        "payload": {"objective": "something entirely different", "next_safe_action": "deploy", "blockers": []},
+        "payload_digest": "@computed",
+        "expected_revision": 8,
+        "evidence_refs": [],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T10:05:00Z"
+      },
+      "expect": {"outcome": "rejected", "error_class": "idempotency_payload_mismatch", "effect": "none", "resulting_revision": 8}
+    }
+  ],
+  "assertions": [
+    "No event is written and no receipt state changes.",
+    "The client must not retry; this is a defect to surface, not a transient failure.",
+    "The stored receipt for the key still points at event aaaaaaaa-0001-4000-8000-000000000001."
+  ]
+}

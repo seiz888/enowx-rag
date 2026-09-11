@@ -1,0 +1,115 @@
+{
+  "fixture": "candidate-promotion",
+  "title": "A candidate becomes a fact only by explicit, authorised promotion",
+  "invariants": ["INV-10"],
+  "narrative": "An extractor proposes a claim. It must not be readable as current state, and a principal without fact_promote cannot turn it into one. Only an explicit promotion naming a principal and evidence creates the fact.",
+  "principals": [
+    {"principal_id": "aa000001-0000-4000-8000-000000000001", "principal_type": "service", "agent_id": "extractor", "roles": ["candidate_write"]},
+    {"principal_id": "55555555-5555-4555-8555-555555555555", "principal_type": "agent", "agent_id": "claude-code", "roles": ["fact_promote", "work_read"]}
+  ],
+  "steps": [
+    {
+      "name": "propose-candidate",
+      "submit": {
+        "event_id": "ab000001-0000-4000-8000-000000000001",
+        "idempotency_key": "extractor:run-42:cand:0001",
+        "principal_id": "aa000001-0000-4000-8000-000000000001",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "session_id": "extractor:host-a:run-42",
+        "branch_id": "44444444-4444-4444-8444-444444444444",
+        "event_type": "fact.candidate_proposed",
+        "payload": {
+          "candidate_id": "c0000003-0000-4000-8000-000000000003",
+          "subject": "postgresql",
+          "predicate": "archive_mode",
+          "object": "off",
+          "cardinality": "single",
+          "source": "session-log-2026-09-09",
+          "extractor": "claim-extractor",
+          "model": "claude-haiku-4-5-20251001",
+          "model_version": "2025-10-01",
+          "confidence": 0.82,
+          "review_status": "pending",
+          "expires_at": "2026-12-08T00:00:00Z"
+        },
+        "payload_digest": "@computed",
+        "evidence_refs": [],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T18:00:00Z"
+      },
+      "expect": {"outcome": "committed", "receipt_state": "committed", "effect": "state_advanced", "visible_as_fact": false, "in_bootstrap_context": false}
+    },
+    {
+      "name": "self-promote-without-role",
+      "submit": {
+        "event_id": "ab000002-0000-4000-8000-000000000002",
+        "idempotency_key": "extractor:run-42:promote:0001",
+        "principal_id": "aa000001-0000-4000-8000-000000000001",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "session_id": "extractor:host-a:run-42",
+        "branch_id": "44444444-4444-4444-8444-444444444444",
+        "event_type": "fact.promoted",
+        "payload": {"candidate_id": "c0000003-0000-4000-8000-000000000003"},
+        "payload_digest": "@computed",
+        "evidence_refs": ["e0000003-0000-4000-8000-000000000003"],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T18:00:05Z"
+      },
+      "expect": {"outcome": "rejected", "error_class": "scope_denied", "effect": "none"}
+    },
+    {
+      "name": "promote-without-evidence",
+      "submit": {
+        "event_id": "ab000003-0000-4000-8000-000000000003",
+        "idempotency_key": "claude:sess-12:promote:0001",
+        "principal_id": "55555555-5555-4555-8555-555555555555",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "session_id": "claude:host-a:sess-12",
+        "branch_id": "44444444-4444-4444-8444-444444444444",
+        "event_type": "fact.promoted",
+        "payload": {"candidate_id": "c0000003-0000-4000-8000-000000000003"},
+        "payload_digest": "@computed",
+        "evidence_refs": [],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T18:01:00Z"
+      },
+      "expect": {"outcome": "rejected", "error_class": "policy_rejected", "effect": "none"}
+    },
+    {
+      "name": "authorised-promotion",
+      "submit": {
+        "event_id": "ab000004-0000-4000-8000-000000000004",
+        "idempotency_key": "claude:sess-12:promote:0002",
+        "principal_id": "55555555-5555-4555-8555-555555555555",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "session_id": "claude:host-a:sess-12",
+        "branch_id": "44444444-4444-4444-8444-444444444444",
+        "event_type": "fact.promoted",
+        "payload": {"candidate_id": "c0000003-0000-4000-8000-000000000003", "subject": "postgresql", "predicate": "archive_mode", "object": "off", "cardinality": "single"},
+        "payload_digest": "@computed",
+        "evidence_refs": ["e0000003-0000-4000-8000-000000000003"],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T18:02:00Z"
+      },
+      "expect": {"outcome": "committed", "receipt_state": "committed", "effect": "state_advanced", "visible_as_fact": true}
+    }
+  ],
+  "assertions": [
+    "A pending candidate never appears in bootstrap context and never answers a current-state query.",
+    "The promotion event records promoted_by_principal_id, the candidate id and at least one evidence ref.",
+    "The candidate's review_status becomes promoted; the candidate row is not silently converted in place.",
+    "model_version may be null for a deterministic extractor, but source, extractor and provenance never may."
+  ]
+}

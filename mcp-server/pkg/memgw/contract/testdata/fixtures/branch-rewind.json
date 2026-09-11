@@ -1,0 +1,66 @@
+{
+  "fixture": "branch-rewind",
+  "title": "A rewind creates lineage and deletes nothing",
+  "invariants": ["INV-19", "INV-09"],
+  "narrative": "A session is rewound three turns and continues down a different path. The abandoned branch keeps its events; the new branch records where it diverged.",
+  "principals": [
+    {"principal_id": "55555555-5555-4555-8555-555555555555", "principal_type": "agent", "agent_id": "claude-code", "roles": ["checkpoint_write", "work_read"]}
+  ],
+  "given": {
+    "branch": {"branch_id": "44444444-4444-4444-8444-444444444444", "status": "active", "events_seq": [101, 102, 103, 104]},
+    "work": {"work_id": "33333333-3333-4333-8333-333333333333", "state": "active", "revision": 30}
+  },
+  "steps": [
+    {
+      "name": "branch-at-102",
+      "submit": {
+        "event_id": "dddddddd-0001-4000-8000-000000000001",
+        "idempotency_key": "claude:sess-9:branch:0102",
+        "principal_id": "55555555-5555-4555-8555-555555555555",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "work_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "claude:host-a:sess-9",
+        "branch_id": "44444444-0002-4444-8444-444444444444",
+        "event_type": "session.branched",
+        "payload": {"parent_branch_id": "44444444-4444-4444-8444-444444444444", "branch_point_seq": 102, "reason_class": "rewind"},
+        "payload_digest": "@computed",
+        "evidence_refs": [],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T13:00:00Z"
+      },
+      "expect": {"outcome": "committed", "receipt_state": "committed", "effect": "none", "resulting_revision": 30}
+    },
+    {
+      "name": "checkpoint-on-new-branch",
+      "submit": {
+        "event_id": "dddddddd-0002-4000-8000-000000000002",
+        "idempotency_key": "claude:sess-9:ckpt:0030",
+        "principal_id": "55555555-5555-4555-8555-555555555555",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "work_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "claude:host-a:sess-9",
+        "branch_id": "44444444-0002-4444-8444-444444444444",
+        "event_type": "checkpoint.recorded",
+        "payload": {"objective": "take the other approach", "next_safe_action": "re-run the fixture suite", "blockers": []},
+        "payload_digest": "@computed",
+        "expected_revision": 30,
+        "evidence_refs": [],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T13:01:00Z"
+      },
+      "expect": {"outcome": "committed", "receipt_state": "committed", "effect": "state_advanced", "resulting_revision": 31}
+    }
+  ],
+  "assertions": [
+    "Events 103 and 104 on the parent branch still exist and are still queryable.",
+    "No seq is renumbered and no event row is updated.",
+    "The parent branch becomes superseded, not deleted.",
+    "The new checkpoint is a new row; the checkpoint on the parent branch is untouched."
+  ]
+}

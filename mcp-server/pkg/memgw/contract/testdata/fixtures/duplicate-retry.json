@@ -1,0 +1,67 @@
+{
+  "fixture": "duplicate-retry",
+  "title": "A retried checkpoint commits once",
+  "invariants": ["INV-01", "INV-02"],
+  "narrative": "The OMP adapter submits a checkpoint, the response is lost, and the outbox retries the identical write. The ledger must recognise the retry and must not record a second checkpoint or advance the work twice.",
+  "principals": [
+    {"principal_id": "55555555-5555-4555-8555-555555555555", "principal_type": "agent", "agent_id": "omp", "roles": ["checkpoint_write", "work_read"]}
+  ],
+  "given": {
+    "work": {"work_id": "33333333-3333-4333-8333-333333333333", "state": "active", "revision": 7}
+  },
+  "steps": [
+    {
+      "name": "first-submit",
+      "submit": {
+        "event_id": "aaaaaaaa-0001-4000-8000-000000000001",
+        "idempotency_key": "omp:sess-1:ckpt:0007",
+        "principal_id": "55555555-5555-4555-8555-555555555555",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "work_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "omp:host-a:sess-1",
+        "branch_id": "44444444-4444-4444-8444-444444444444",
+        "event_type": "checkpoint.recorded",
+        "payload": {"objective": "freeze the ledger contract", "next_safe_action": "write fixtures", "blockers": []},
+        "payload_digest": "@computed",
+        "expected_revision": 7,
+        "evidence_refs": [],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T10:00:00Z"
+      },
+      "expect": {"outcome": "committed", "receipt_state": "committed", "effect": "state_advanced", "resulting_revision": 8}
+    },
+    {
+      "name": "retry-after-lost-response",
+      "submit": {
+        "event_id": "aaaaaaaa-0001-4000-8000-000000000001",
+        "idempotency_key": "omp:sess-1:ckpt:0007",
+        "principal_id": "55555555-5555-4555-8555-555555555555",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "work_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "omp:host-a:sess-1",
+        "branch_id": "44444444-4444-4444-8444-444444444444",
+        "event_type": "checkpoint.recorded",
+        "payload": {"objective": "freeze the ledger contract", "next_safe_action": "write fixtures", "blockers": []},
+        "payload_digest": "@computed",
+        "expected_revision": 7,
+        "evidence_refs": [],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T10:00:04Z"
+      },
+      "expect": {"outcome": "duplicate", "receipt_state": "duplicate", "effect": "none", "resulting_revision": 8}
+    }
+  ],
+  "digest_relation": {"equal": [["first-submit", "retry-after-lost-response"]]},
+  "assertions": [
+    "The retry reuses the identical event_id; a regenerated event_id would be a defect, not a retry.",
+    "Exactly one checkpoint row exists for this work at revision 8.",
+    "The work revision is 8, not 9.",
+    "occurred_at differs between the two submissions and has no effect on the outcome."
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "fixture": "principal-scope-denial",
+  "title": "A principal cannot widen its own scope, and out-of-scope text never reaches an embedding provider",
+  "invariants": ["INV-13", "INV-17"],
+  "narrative": "A Droid principal granted only project A asks for project B, then declares a wider scope than it holds. Both are refused, and the refusal happens before retrieval, so no out-of-scope text is ever embedded or reranked.",
+  "principals": [
+    {
+      "principal_id": "77777777-0001-4777-8777-777777777777",
+      "principal_type": "agent",
+      "agent_id": "droid",
+      "roles": ["history_read", "work_read", "checkpoint_write"],
+      "grants": [{"project_id": "11111111-1111-4111-8111-111111111111", "workspace_id": "22222222-2222-4222-8222-222222222222"}]
+    }
+  ],
+  "given": {
+    "other_project": {"project_id": "1b1b1b1b-1b1b-4b1b-8b1b-1b1b1b1b1b1b"}
+  },
+  "steps": [
+    {
+      "name": "read-outside-scope",
+      "operation": "history_search",
+      "actor": "77777777-0001-4777-8777-777777777777",
+      "request": {"project_id": "1b1b1b1b-1b1b-4b1b-8b1b-1b1b1b1b1b1b", "query": "deployment target"},
+      "expect": {"outcome": "rejected", "error_class": "scope_denied", "effect": "none", "embedding_calls": 0, "rerank_calls": 0}
+    },
+    {
+      "name": "write-outside-scope",
+      "submit": {
+        "event_id": "77770001-0001-4000-8000-000000000001",
+        "idempotency_key": "droid:sess-3:ckpt:0001",
+        "principal_id": "77777777-0001-4777-8777-777777777777",
+        "project_id": "1b1b1b1b-1b1b-4b1b-8b1b-1b1b1b1b1b1b",
+        "workspace_id": "2b2b2b2b-2b2b-4b2b-8b2b-2b2b2b2b2b2b",
+        "session_id": "droid:host-c:sess-3",
+        "branch_id": "44444444-4444-4444-8444-444444444444",
+        "event_type": "checkpoint.recorded",
+        "payload": {"objective": "touch another project", "next_safe_action": "stop", "blockers": []},
+        "payload_digest": "@computed",
+        "evidence_refs": [],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T17:00:00Z"
+      },
+      "expect": {"outcome": "rejected", "error_class": "scope_denied", "effect": "none"}
+    },
+    {
+      "name": "declare-wider-scope-than-granted",
+      "operation": "history_search",
+      "actor": "77777777-0001-4777-8777-777777777777",
+      "request": {"declared_scope": {"project_id": null}, "query": "everything"},
+      "expect": {"outcome": "rejected", "error_class": "scope_denied", "effect": "none", "embedding_calls": 0}
+    }
+  ],
+  "assertions": [
+    "Effective scope is the intersection of the declared scope and the granted scope; a null narrowing column in a request never means 'all projects'.",
+    "The scope check runs before retrieval, before reranking and before any provider call.",
+    "A valid shared bearer token does not substitute for a grant."
+  ]
+}

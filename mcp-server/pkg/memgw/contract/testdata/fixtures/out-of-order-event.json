@@ -1,0 +1,65 @@
+{
+  "fixture": "out-of-order-event",
+  "title": "A late event with a stale revision and an older clock cannot rewind state",
+  "invariants": ["INV-07", "INV-20"],
+  "narrative": "A host that was offline flushes its outbox. Its events carry older occurred_at values and an expected_revision that has since been passed. Wall-clock order must not matter, and stale state must not be re-applied.",
+  "principals": [
+    {"principal_id": "66666666-6666-4666-8666-666666666666", "principal_type": "agent", "agent_id": "opencode", "roles": ["checkpoint_write"]}
+  ],
+  "given": {
+    "work": {"work_id": "33333333-3333-4333-8333-333333333333", "state": "review", "revision": 20},
+    "note": "The ledger already holds events with occurred_at up to 2026-09-09T12:00:00Z."
+  },
+  "steps": [
+    {
+      "name": "late-flush-stale-revision",
+      "submit": {
+        "event_id": "cccccccc-0001-4000-8000-000000000001",
+        "idempotency_key": "opencode:sess-2:advance:0015",
+        "principal_id": "66666666-6666-4666-8666-666666666666",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "work_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "opencode:host-b:sess-2",
+        "branch_id": "44444444-4444-4444-8444-444444444444",
+        "event_type": "work.activated",
+        "payload": {"reason_class": "resumed_after_offline"},
+        "payload_digest": "@computed",
+        "expected_revision": 15,
+        "evidence_refs": [],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T08:30:00Z"
+      },
+      "expect": {"outcome": "rejected", "error_class": "stale_revision", "effect": "none", "resulting_revision": 20}
+    },
+    {
+      "name": "late-flush-evidence-accepted",
+      "submit": {
+        "event_id": "cccccccc-0002-4000-8000-000000000002",
+        "idempotency_key": "opencode:sess-2:evidence:0003",
+        "principal_id": "66666666-6666-4666-8666-666666666666",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "work_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "opencode:host-b:sess-2",
+        "branch_id": "44444444-4444-4444-8444-444444444444",
+        "event_type": "evidence.recorded",
+        "payload": {"evidence_type": "command_exit", "evidence_class": "observed", "locator": "sha256:1f0c"},
+        "payload_digest": "@computed",
+        "evidence_refs": [],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T08:31:00Z"
+      },
+      "expect": {"outcome": "committed", "receipt_state": "committed", "effect": "none", "resulting_revision": 20}
+    }
+  ],
+  "assertions": [
+    "Late evidence is still accepted; it is additive and mutates no aggregate.",
+    "The committed late event receives a seq higher than events with newer occurred_at, and that is correct.",
+    "Nothing in the outcome depends on comparing occurred_at values."
+  ]
+}

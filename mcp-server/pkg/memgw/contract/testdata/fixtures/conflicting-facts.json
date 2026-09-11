@@ -1,0 +1,59 @@
+{
+  "fixture": "conflicting-facts",
+  "title": "Contradicting single-valued facts are flagged, never auto-merged",
+  "invariants": ["INV-08"],
+  "narrative": "Two hosts promote contradictory values for the same single-valued predicate within overlapping validity. The ledger marks the conflict and returns both with their evidence. Nothing picks a winner by timestamp, and no model is asked to reconcile them.",
+  "principals": [
+    {"principal_id": "55555555-5555-4555-8555-555555555555", "principal_type": "agent", "agent_id": "claude-code", "roles": ["fact_promote", "work_read"]},
+    {"principal_id": "66666666-6666-4666-8666-666666666666", "principal_type": "agent", "agent_id": "opencode", "roles": ["fact_promote", "work_read"]}
+  ],
+  "given": {
+    "fact": {
+      "fact_id": "f0000001-0000-4000-8000-000000000001",
+      "subject": "enowx-rag",
+      "predicate": "deployment_target",
+      "object": "seiz-vps-arm64",
+      "cardinality": "single",
+      "status": "active",
+      "revision": 3,
+      "valid_from": "2026-09-01T00:00:00Z"
+    }
+  },
+  "steps": [
+    {
+      "name": "contradicting-promotion",
+      "submit": {
+        "event_id": "eeeeeeee-0001-4000-8000-000000000001",
+        "idempotency_key": "opencode:sess-7:promote:0002",
+        "principal_id": "66666666-6666-4666-8666-666666666666",
+        "project_id": "11111111-1111-4111-8111-111111111111",
+        "workspace_id": "22222222-2222-4222-8222-222222222222",
+        "session_id": "opencode:host-b:sess-7",
+        "branch_id": "44444444-4444-4444-8444-444444444444",
+        "event_type": "fact.promoted",
+        "payload": {
+          "subject": "enowx-rag",
+          "predicate": "deployment_target",
+          "object": "oracle-vps-amd64",
+          "cardinality": "single",
+          "valid_from": "2026-09-05T00:00:00Z",
+          "candidate_id": "c0000001-0000-4000-8000-000000000001"
+        },
+        "payload_digest": "@computed",
+        "expected_revision": 3,
+        "evidence_refs": ["e0000001-0000-4000-8000-000000000001"],
+        "sensitivity_class": "internal",
+        "policy_version": "1.0.0",
+        "schema_version": "1.0.0",
+        "occurred_at": "2026-09-09T14:00:00Z"
+      },
+      "expect": {"outcome": "committed", "receipt_state": "committed", "effect": "state_advanced", "resulting_revision": 4, "resulting_status": "conflicted"}
+    }
+  ],
+  "assertions": [
+    "Both values are returned to any reader, each with its promoting principal and evidence.",
+    "Neither value is silently dropped and neither is chosen by recency.",
+    "Resolution requires an explicit fact.superseded or fact.retracted event by a principal holding fact_promote.",
+    "No LLM is invoked to merge the two claims."
+  ]
+}
