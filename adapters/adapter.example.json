@@ -1,0 +1,8 @@
+{
+  "project_id": "00000000-0000-0000-0000-000000000000",
+  "workspace_id": "00000000-0000-0000-0000-000000000000",
+  "writer_epoch": 1,
+  "sensitivity_class": "internal",
+  "collector": { "pipe": "memgw-collector" },
+  "gateway": { "base_url": "http://127.0.0.1:7777", "token_path": "C:\path\to\memgw-token" }
+}

@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "enowx-rag memgw adapter --host droid", "timeout": 20 }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          { "type": "command", "command": "enowx-rag memgw adapter --host droid", "timeout": 20 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "enowx-rag memgw adapter --host droid", "timeout": 20 }
+        ]
+      }
+    ]
+  }
+}

@@ -42,7 +42,7 @@ export function Playground({ activeProject, sharedQuery, onSharedQueryChange }: 
   const [rerank, setRerank] = useState(false)
   const [compress, setCompress] = useState(false)
   const [k, setK] = useState(5)
-  const [recall, setRecall] = useState(40)
+  const [recall, setRecall] = useState(25)
   const { events, connected } = useEvents()
 
   // Sync local query when sharedQuery changes (e.g., arriving from Overview)

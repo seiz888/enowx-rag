@@ -68,7 +68,7 @@ export function Overview({ activeProject, onNavigate, onNavigateWithQuery, share
   const [rerank, setRerank] = useState(true)
   const [compress, setCompress] = useState(false)
   const [k, setK] = useState(4)
-  const [recall, setRecall] = useState(40)
+  const [recall, setRecall] = useState(25)
   const [stats, setStats] = useState<{ totalChunks: number; embedModel: string } | null>(null)
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null)
   const [points, setPoints] = useState<PointInfo[]>([])
@@ -100,7 +100,18 @@ export function Overview({ activeProject, onNavigate, onNavigateWithQuery, share
       setPoints([])
       return
     }
-    api.listPoints(activeProject).then(setPoints).catch(() => setPoints([]))
+    // Page through every chunk: file aggregates need the complete set and the
+    // API caps a single response (default 100, max 500).
+    ;(async () => {
+      const all: PointInfo[] = []
+      const page = 500
+      for (let offset = 0; ; offset += page) {
+        const batch = await api.listPoints(activeProject, { offset, limit: page })
+        all.push(...batch)
+        if (batch.length < page) break
+      }
+      setPoints(all)
+    })().catch(() => setPoints([]))
   }, [activeProject])
 
   useEffect(() => {
@@ -211,7 +222,7 @@ export function Overview({ activeProject, onNavigate, onNavigateWithQuery, share
           <div className="sub mono">{metrics?.backend ? `${metrics.backend}${metrics.persistent ? ' · persistent' : ''}` : ''}</div>
         </div>
         <div className="kpi">
-          <div className="label">Avg. query latency</div>
+          <div className="label">Avg. end-to-end search</div>
           {metrics && metrics.query_count > 0 ? (
             <>
               <div className="val tnum">{Math.round(metrics.avg_latency_ms)}<small> ms</small></div>
@@ -222,7 +233,7 @@ export function Overview({ activeProject, onNavigate, onNavigateWithQuery, share
           )}
         </div>
         <div className="kpi">
-          <div className="label">Tokens used</div>
+          <div className="label">Tokens since server start</div>
           {metrics && metrics.tokens_total > 0 ? (
             <>
               <div className="val tnum">{formatTokens(metrics.tokens_total)}</div>

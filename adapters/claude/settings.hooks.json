@@ -1,0 +1,50 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "enowx-rag", "args": ["memgw", "adapter", "--host", "claude"], "timeout": 20 },
+          { "type": "command", "command": "enowx-rag", "args": ["memgw", "adapter", "--host", "claude", "--bootstrap-context"], "timeout": 20 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "enowx-rag", "args": ["memgw", "checkpoint", "--capture", "--host", "claude", "--quiet"], "timeout": 10 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "TodoWrite|TaskCreate|TaskUpdate|TaskList",
+        "hooks": [
+          { "type": "command", "command": "enowx-rag", "args": ["memgw", "checkpoint", "--capture", "--host", "claude"], "timeout": 20 }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          { "type": "command", "command": "enowx-rag", "args": ["memgw", "adapter", "--host", "claude"], "timeout": 20 },
+          { "type": "command", "command": "enowx-rag", "args": ["memgw", "checkpoint", "--capture", "--host", "claude"], "timeout": 20 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "enowx-rag", "args": ["memgw", "checkpoint", "--capture", "--host", "claude"], "timeout": 20 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "enowx-rag", "args": ["memgw", "adapter", "--host", "claude"], "timeout": 20 },
+          { "type": "command", "command": "enowx-rag", "args": ["memgw", "checkpoint", "--capture", "--host", "claude"], "timeout": 20 }
+        ]
+      }
+    ]
+  }
+}
