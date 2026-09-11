@@ -85,6 +85,16 @@ function Start-AllVerified {
 
     $existing = Get-Supervised
 
+    # --- Containers before anything ---------------------------------------
+    # The gateway is useless without its ledger: it starts, then fails every
+    # commit. Bringing the containers up first -- and waiting for the ledger to
+    # accept a connection rather than merely exist -- is what makes a fresh
+    # boot recover instead of half-recover.
+    if (-not (Start-MemgwContainers)) {
+        Write-MemgwLog -Name 'ops' -Level 'error' -Message 'required containers are not available; not starting the gateway'
+        return $false
+    }
+
     # --- Gateway first -----------------------------------------------------
     if ($existing.ContainsKey('gateway')) {
         Write-MemgwLog -Name 'gateway' -Message "already running pid=$($existing['gateway'].ProcId)"
@@ -138,6 +148,23 @@ if (Test-Path -LiteralPath $stopFile) { Remove-Item -LiteralPath $stopFile -Forc
 while (-not (Test-Path -LiteralPath $stopFile)) {
     Start-Sleep -Seconds $PollSeconds
     try {
+        # A container that died mid-run looks exactly like a healthy gateway
+        # with nowhere to write, so it is checked before the processes. If the
+        # ledger is gone the gateway is restarted too: it may have a broken
+        # connection pool, and reconnecting cleanly is cheaper than trusting it.
+        $containerGone = $null
+        foreach ($c in $script:MemgwContainers) {
+            if (-not (Test-MemgwContainerRunning -Name $c.Name)) {
+                $containerGone = $c.Name
+                break
+            }
+        }
+        if ($containerGone) {
+            Write-MemgwLog -Name 'ops' -Level 'warn' -Message "container $containerGone is not running; restarting the stack"
+            [void](Start-AllVerified)
+            continue
+        }
+
         $running = Get-Supervised
         if (-not $running.ContainsKey('gateway')) {
             Write-MemgwLog -Name 'gateway' -Level 'warn' -Message 'gateway is gone; restarting entire stack in order'

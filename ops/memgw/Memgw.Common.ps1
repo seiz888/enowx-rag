@@ -340,6 +340,146 @@ function Start-MemgwCollector {
     return $p
 }
 
+# --- Containers ------------------------------------------------------------
+# The gateway is useless without its ledger, and the ledger lives in a Docker
+# container on this machine. After a reboot the container is simply absent
+# until something starts it: nothing in this pilot ever did, so the gateway
+# came up, failed to reach its database, and every hook reported a durability
+# failure. These helpers are that missing step.
+
+$script:MemgwContainers = @(
+    # The canonical ledger. If this is down the gateway cannot commit anything.
+    @{ Name = 'memgw-live'; Required = $true;  ReadyProbe = 'ledger' }
+    # The vector projection. Not required for durability -- the gateway writes
+    # events and receipts with the projection absent and catches up later -- so
+    # a failure here is reported and does not block startup.
+    @{ Name = 'memgw-qdrant'; Required = $false; ReadyProbe = $null }
+)
+
+function Test-MemgwDockerReady {
+    <#
+    .SYNOPSIS
+        Return $true once the Docker daemon answers.
+    .DESCRIPTION
+        After a reboot Docker Desktop is still starting when the logon task
+        fires, so "no containers" usually means "the daemon is not up yet"
+        rather than "the containers are gone". Waiting for the daemon first
+        keeps that distinction out of the caller.
+    #>
+    [CmdletBinding()]
+    param([int]$TimeoutSeconds = 180, [int]$IntervalMs = 2000)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $null = & docker info --format '{{.ServerVersion}}' 2>$null
+            if ($LASTEXITCODE -eq 0) { return $true }
+        } catch { }
+        Start-Sleep -Milliseconds $IntervalMs
+    }
+    return $false
+}
+
+function Test-MemgwContainerRunning {
+    <#
+    .SYNOPSIS
+        Return $true when the named container is running.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+    try {
+        $state = & docker inspect -f '{{.State.Running}}' $Name 2>$null
+        return ($LASTEXITCODE -eq 0 -and "$state".Trim() -eq 'true')
+    } catch {
+        return $false
+    }
+}
+
+function Test-MemgwLedgerReady {
+    <#
+    .SYNOPSIS
+        Return $true once the ledger accepts a connection.
+    .DESCRIPTION
+        `docker start` returns as soon as the container is created, well before
+        PostgreSQL has replayed its WAL and is accepting connections. The
+        gateway would fail its first commit against a database that is seconds
+        away from being up, so readiness is a real query, not a state flag.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Container, [int]$TimeoutSeconds = 120, [int]$IntervalMs = 1000)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $out = & docker exec -u postgres $Container pg_isready -q 2>$null
+            if ($LASTEXITCODE -eq 0) { return $true }
+        } catch { }
+        Start-Sleep -Milliseconds $IntervalMs
+    }
+    return $false
+}
+
+function Start-MemgwContainer {
+    <#
+    .SYNOPSIS
+        Ensure one container is running and ready.
+    .DESCRIPTION
+        Returns $true when the container is running (and, for the ledger,
+        accepting connections). A container already running is left alone.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$Container, [int]$TimeoutSeconds = 120)
+
+    $name = $Container.Name
+    if (Test-MemgwContainerRunning -Name $name) {
+        Write-MemgwLog -Name 'ops' -Message "container $name already running"
+    } else {
+        Write-MemgwLog -Name 'ops' -Message "starting container $name"
+        $out = & docker start $name 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-MemgwLog -Name 'ops' -Level 'error' -Message "docker start $name failed: $($out -join ' ')"
+            return $false
+        }
+    }
+
+    if ($Container.ReadyProbe -eq 'ledger') {
+        if (-not (Test-MemgwLedgerReady -Container $name -TimeoutSeconds $TimeoutSeconds)) {
+            Write-MemgwLog -Name 'ops' -Level 'error' -Message "container $name is running but the ledger is not accepting connections"
+            return $false
+        }
+    }
+    return $true
+}
+
+function Start-MemgwContainers {
+    <#
+    .SYNOPSIS
+        Bring up every required container, else report which failed.
+    .DESCRIPTION
+        A required container that cannot be brought up is a hard failure -- the
+        caller must not start a gateway that has nowhere to write. An optional
+        one is logged and ignored.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (-not (Test-MemgwDockerReady -TimeoutSeconds 180)) {
+        Write-MemgwLog -Name 'ops' -Level 'error' -Message 'docker daemon did not answer within 180s'
+        return $false
+    }
+
+    $ok = $true
+    foreach ($c in $script:MemgwContainers) {
+        $started = Start-MemgwContainer -Container $c
+        if (-not $started -and $c.Required) {
+            $ok = $false
+        } elseif (-not $started) {
+            Write-MemgwLog -Name 'ops' -Level 'warn' -Message "optional container $($c.Name) is not available"
+        }
+    }
+    return $ok
+}
+
 # --- Discovery -------------------------------------------------------------
 
 function Get-MemgwRunningProcesses {

@@ -166,25 +166,146 @@ try {
     }
 }
 
-# --- off-host backup freshness ---------------------------------------------
-# A backup that silently stopped is the failure this whole check exists for.
-# The sealed copies are the off-host record; their newest age is the real RPO
-# signal, so anything older than the warn/fail thresholds is reported.
-$sealedDir = 'D:\memgw-backups\vps\sealed'
+# --- off-host backup of the production database (axonhub) -------------------
+# This check used to look at the newest `*.aes` by age alone, which made it the
+# most dangerous kind of control: during a manual test it found four
+# 114 KB `travelya` dumps from a 10 MB scratch database, saw a fresh mtime, and
+# reported `ok` -- while the real target (`axonhub`, 8.9 GB) had failed every
+# scheduled run. A green light over a broken pipeline is worse than no light.
+#
+# So the check now reads the manifest each sealed artefact carries, and counts
+# only the production database at a realistic size. Test artefacts cannot pass
+# no matter how fresh they are.
+# Two places hold sealed production dumps: the off-host pull writes to
+# `vps\sealed`, and a manual one-shot transfer left a full-size axonhub dump at
+# the root. Both are real off-host copies, so both count; what does not count is
+# anything smaller than a plausible production dump or belonging to another
+# database.
+$sealedDirs = @('D:\memgw-backups\vps\sealed', 'D:\memgw-backups')
+$prodDatabase = 'axonhub'
+# The axonhub dump compresses to ~4.7 GB. A gigabyte floor is far above any
+# scratch database (travelya is ~114 KB) and far below the real thing, so it
+# separates "a real production dump" from "something else" with no tuning.
+$prodMinBytes = 1GB
 $backupWarn = [TimeSpan]::FromHours(30)
 $backupFail = [TimeSpan]::FromHours(72)
-$newest = Get-ChildItem -LiteralPath $sealedDir -Filter '*.aes' -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if ($null -eq $newest) {
-    Add-Check 'offhost-backup' 'fail' "no sealed backup in $sealedDir"
+
+$artefacts = @($sealedDirs | ForEach-Object {
+    Get-ChildItem -LiteralPath $_ -Filter '*.aes' -File -ErrorAction SilentlyContinue
+})
+$prodCandidates = @()
+$sawOtherDb = New-Object System.Collections.Generic.List[string]
+foreach ($a in $artefacts) {
+    # Database identity comes from the manifest when the pull wrote one, and
+    # from the filename prefix otherwise (the manual transfer wrote none).
+    $m = Get-Item -LiteralPath "$($a.FullName).manifest" -ErrorAction SilentlyContinue
+    $fields = @{}
+    if ($m) {
+        foreach ($line in (Get-Content -LiteralPath $m.FullName -ErrorAction SilentlyContinue)) {
+            $i = $line.IndexOf('=')
+            if ($i -gt 0) { $fields[$line.Substring(0, $i).Trim()] = $line.Substring($i + 1).Trim() }
+        }
+    }
+    $dbName = if ($fields.ContainsKey('database')) { $fields['database'] } else { ($a.Name -split '-')[0] }
+    if ($dbName -ne $prodDatabase) {
+        $sawOtherDb.Add($dbName)
+        continue
+    }
+    $len = $a.Length
+    if ($len -lt $prodMinBytes) { continue }
+    $prodCandidates += [pscustomobject]@{
+        Artefact = $a.FullName
+        Name     = $a.Name
+        Bytes    = $len
+        ManifestBytes = [long]$fields['bytes']
+        TakenAt  = $fields['taken_at']
+        WriteTime = $a.LastWriteTime
+    }
+}
+
+if ($prodCandidates.Count -eq 0) {
+    $other = if ($sawOtherDb.Count -gt 0) { " (only non-production: $(($sawOtherDb | Sort-Object -Unique) -join ', '))" } else { '' }
+    Add-Check 'offhost-backup' 'fail' "no sealed $prodDatabase backup >= $([int]($prodMinBytes / 1MB))MB in $($sealedDirs -join ', ')$other"
 } else {
-    $age = (Get-Date) - $newest.LastWriteTime
-    if ($age -ge $backupFail) {
-        Add-Check 'offhost-backup' 'fail' "newest sealed backup is $([int]$age.TotalHours)h old ($($newest.Name))"
+    $newest = $prodCandidates | Sort-Object WriteTime -Descending | Select-Object -First 1
+    $age = (Get-Date) - $newest.WriteTime
+    # Provenance must agree with the file it names: a manifest pointing at a
+    # different size is a copy/attribution bug, not a stale backup.
+    $sizeAgrees = ($newest.ManifestBytes -le 0) -or ($newest.ManifestBytes -eq $newest.Bytes)
+    $desc = "$($newest.Name) ($([math]::Round($newest.Bytes / 1GB, 2))GB, $([int]$age.TotalHours)h old)"
+    if (-not $sizeAgrees) {
+        Add-Check 'offhost-backup' 'fail' "$desc but its manifest claims $($newest.ManifestBytes) bytes"
+    } elseif ($age -ge $backupFail) {
+        Add-Check 'offhost-backup' 'fail' "newest sealed $prodDatabase backup is $([int]$age.TotalHours)h old ($desc)"
     } elseif ($age -ge $backupWarn) {
-        Add-Check 'offhost-backup' 'warn' "newest sealed backup is $([int]$age.TotalHours)h old ($($newest.Name))"
+        Add-Check 'offhost-backup' 'warn' "newest sealed $prodDatabase backup is $([int]$age.TotalHours)h old ($desc)"
     } else {
-        Add-Check 'offhost-backup' 'ok' "newest sealed backup $($newest.Name) ($([int]$age.TotalHours)h old)"
+        Add-Check 'offhost-backup' 'ok' "$desc"
+    }
+}
+
+# --- VPS backup pipeline state ----------------------------------------------
+# Freshness alone only notices a broken pipeline after the freshness window
+# (72h). Asking systemd directly notices it the same day: a `failed` unit or a
+# timer that is gone means no new dump is coming, whatever is on disk today.
+# An SSH failure here is a `warn`, not a `fail`: not being able to ask is a
+# different fact from the answer being bad, and the freshness check above
+# still fails if the pipeline really has stopped.
+$vpsTimer = 'rag-pg-backup.timer'
+$vpsUnit  = 'rag-pg-backup.service'
+$sshArgs = @('-i', "$env:USERPROFILE\.ssh\id_oracle", '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
+             'ubuntu@168.110.218.207')
+$remote = & ssh @sshArgs "systemctl is-active $vpsTimer; systemctl is-failed $vpsUnit; systemctl show $vpsUnit -p Result -p ExecMainStatus" 2>&1
+if ($LASTEXITCODE -ne 0 -and $remote -notmatch '^(active|inactive|failed)') {
+    Add-Check 'backup-pipeline' 'warn' "could not query $vpsUnit over ssh: $($remote | Select-Object -First 1)"
+} else {
+    $timerState = "$($remote[0])".Trim()
+    $unitFailed = "$($remote[1])".Trim()
+    $resultLine = ($remote | Where-Object { $_ -match '^ExecMainStatus=' }) -join ' '
+    $resultValue = ($remote | Where-Object { $_ -match '^Result=' }) -replace '^Result=', ''
+    $status = ($resultValue | Select-Object -First 1)
+    if ($timerState -ne 'active') {
+        Add-Check 'backup-pipeline' 'fail' "$vpsTimer is '$timerState'; the daily staging run will not fire"
+    } elseif ($unitFailed -eq 'failed') {
+        Add-Check 'backup-pipeline' 'fail' "$vpsUnit last result $status ($resultLine); no new dump is being staged"
+    } else {
+        Add-Check 'backup-pipeline' 'ok' "$vpsTimer active; $vpsUnit last result $status ($resultLine)"
+    }
+}
+
+# --- canonical ledger backup (container memgw-live) -------------------------
+# The ledger is the authority for every agent's work state. Until recently it
+# had no backup at all, and the one artefact that existed was a 1,270-byte
+# text-mode redirect of a binary dump: it had the right shape and restored
+# nothing. The task now runs daily; this check confirms a sealed copy exists
+# and that its manifest records a real ledger (the TOC-entry count is what the
+# old broken dump failed).
+$ledgerDir = 'D:\memgw-backups'
+$ledgerWarn = [TimeSpan]::FromHours(36)
+$ledgerFail = [TimeSpan]::FromHours(96)
+$newestLedger = Get-ChildItem -LiteralPath $ledgerDir -Filter '*.dump.dpapi' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($null -eq $newestLedger) {
+    Add-Check 'ledger-backup' 'fail' "no sealed ledger backup in $ledgerDir"
+} else {
+    $age = (Get-Date) - $newestLedger.LastWriteTime
+    $mPath = "$($newestLedger.FullName).manifest"
+    $toc = $null
+    if (Test-Path -LiteralPath $mPath) {
+        $mLine = Get-Content -LiteralPath $mPath | Where-Object { $_ -match '^toc_entries=' }
+        if ($mLine) { $toc = [int]($mLine -replace '^toc_entries=', '') }
+    }
+    $desc = "$($newestLedger.Name) ($([math]::Round($newestLedger.Length / 1KB))KB, $([int]$age.TotalHours)h old)"
+    if ($null -eq $toc) {
+        Add-Check 'ledger-backup' 'fail' "$desc but no readable manifest beside it"
+    } elseif ($toc -lt 100) {
+        Add-Check 'ledger-backup' 'fail' "$desc but its manifest records only $toc TOC entries (an empty or text-mangled dump)"
+    } elseif ($age -ge $ledgerFail) {
+        Add-Check 'ledger-backup' 'fail' "newest sealed ledger backup is $([int]$age.TotalHours)h old ($desc)"
+    } elseif ($age -ge $ledgerWarn) {
+        Add-Check 'ledger-backup' 'warn' "newest sealed ledger backup is $([int]$age.TotalHours)h old ($desc)"
+    } else {
+        Add-Check 'ledger-backup' 'ok' "$desc, $toc TOC entries"
     }
 }
 

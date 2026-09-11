@@ -42,7 +42,12 @@
 [CmdletBinding()]
 param(
     [int]$Keep = 4,
-    [switch]$SkipTransfer
+    [switch]$SkipTransfer,
+    # Only pull/verify/seal artefacts for this database (e.g. 'service_charge').
+    # Default: every staged database. Useful when one dump is very large and an
+    # operator wants to exercise or fetch one target without moving the rest --
+    # and it keeps a verification run from depending on the biggest dump.
+    [string]$Database = ''
 )
 
 Set-StrictMode -Version Latest
@@ -60,6 +65,8 @@ $LocalRoot = 'D:\memgw-backups\vps'
 $LocalStage = Join-Path $LocalRoot 'stage'
 $SealedDir  = Join-Path $LocalRoot 'sealed'
 $LogFile    = Join-Path $LocalRoot 'pull.log'
+# sftp glob prefix: empty for every database, `<db>-` for one.
+$globPrefix = if ($Database) { "$Database-" } else { '' }
 
 New-Item -ItemType Directory -Force -Path $LocalStage, $SealedDir | Out-Null
 
@@ -94,10 +101,14 @@ if (-not $SkipTransfer) {
     # the timestamp, so a re-pull of an existing name is idempotent.
     $batch = @(
         "lcd `"$LocalStage`""
-        "get -p ${RemoteStage}*.dump.gz"
-        "get -p ${RemoteStage}*.sha256"
-        "get -p ${RemoteStage}latest.manifest"
+        "get -p ${RemoteStage}$($globPrefix)*.dump.gz"
+        "get -p ${RemoteStage}$($globPrefix)*.sha256"
+        # Per-dump manifests, so a sealed artefact carries its OWN provenance
+        # (database, bytes, sha256, taken_at) instead of whichever dump
+        # happened to be newest at seal time.
+        "get -p ${RemoteStage}$($globPrefix)*.dump.gz.manifest"
     ) -join "`n"
+    if (-not $Database) { $batch += "`nget -p ${RemoteStage}latest.manifest" }
     $batchFile = Join-Path $env:TEMP "memgw-pull-$([guid]::NewGuid().ToString('N')).txt"
     Set-Content -LiteralPath $batchFile -Value $batch -Encoding ascii
     try {
@@ -167,8 +178,18 @@ function Seal-One {
     $cs  = New-Object System.Security.Cryptography.CryptoStream($out, $dec, [System.Security.Cryptography.CryptoStreamMode]::Write)
     try { $in.CopyTo($cs, 1048576) } finally { $cs.Dispose(); $in.Dispose(); $out.Dispose() }
 
-    # Carry the manifest beside the sealed copy so provenance travels with it.
-    Copy-Item -LiteralPath (Join-Path $LocalStage 'latest.manifest') -Destination "${sealed}.manifest" -Force -ErrorAction SilentlyContinue
+    # Carry the dump's OWN manifest beside the sealed copy so provenance
+    # travels with it. The per-dump manifest the VPS writes is authoritative;
+    # `latest.manifest` is only a fallback for a dump staged by an older
+    # revision of the script that did not write per-dump manifests, and using
+    # it blind can attach another database's identity to this artefact.
+    $ownManifest = "$($Dump.FullName).manifest"
+    if (Test-Path -LiteralPath $ownManifest) {
+        Copy-Item -LiteralPath $ownManifest -Destination "${sealed}.manifest" -Force
+    } else {
+        Copy-Item -LiteralPath (Join-Path $LocalStage 'latest.manifest') -Destination "${sealed}.manifest" -Force -ErrorAction SilentlyContinue
+        Write-Log "warn ${stamp}: no per-dump manifest; sealed with latest.manifest"
+    }
     "$(Get-Sha256Hex -Path $sealed)  $(Split-Path -Leaf $sealed)" |
         Set-Content -LiteralPath "${sealed}.sha256" -Encoding utf8
     Write-Log "sealed $stamp -> $(Split-Path -Leaf $sealed) ($((Get-Item $sealed).Length) bytes)"
@@ -176,9 +197,18 @@ function Seal-One {
 
 foreach ($d in $dumps) {
     # Only seal a dump whose checksum verified (or has no checksum file to
-    # contradict it, which the verify step already failed).
+    # contradict it, which the verify step already failed). A failure on one
+    # dump must not stop the others from being sealed: a broken small test
+    # dump would otherwise block the production one.
     $sumFile = "$($d.FullName).sha256"
-    if ((Test-Path -LiteralPath $sumFile) -and $failures -eq 0) {
+    $verified = $true
+    if (Test-Path -LiteralPath $sumFile) {
+        $expected = ((Get-Content -LiteralPath $sumFile -Raw) -split '\s+')[0].Trim().ToLowerInvariant()
+        $verified = (Get-Sha256Hex -Path $d.FullName) -eq $expected
+    } else {
+        $verified = $false
+    }
+    if ($verified) {
         Seal-One -Dump $d
     }
 }
