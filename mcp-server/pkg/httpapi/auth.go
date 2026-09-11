@@ -17,7 +17,11 @@ import (
 // The token comparison uses subtle.ConstantTimeCompare to prevent timing attacks.
 func AdminTokenMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := config.EffectiveAdminToken()
+		token, err := config.EffectiveAdminToken()
+		if err != nil {
+			writeErr(w, http.StatusServiceUnavailable, "authentication configuration unavailable")
+			return
+		}
 		if token == "" {
 			next.ServeHTTP(w, r)
 			return
@@ -46,7 +50,11 @@ func LocalOrAdminMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		token := config.EffectiveAdminToken()
+		token, err := config.EffectiveAdminToken()
+		if err != nil {
+			writeErr(w, http.StatusServiceUnavailable, "authentication configuration unavailable")
+			return
+		}
 		provided := extractBearerToken(r)
 		if token != "" && provided != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(token)) == 1 {
 			next.ServeHTTP(w, r)

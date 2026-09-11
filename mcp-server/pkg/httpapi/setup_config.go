@@ -34,23 +34,28 @@ func currentConfig() *config.Config {
 // secrets masked (never returns full keys). Safe for display.
 func (h *Handlers) SetupConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := currentConfig()
+	token, err := config.EffectiveAdminToken()
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "authentication configuration unavailable")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"vector_store":     cfg.VectorStore,
-		"embedder":         cfg.Embedder,
-		"qdrant_url":       cfg.QdrantURL,
-		"qdrant_api_key":   maskSecret(cfg.QdrantAPIKey),
-		"chroma_url":       cfg.ChromaURL,
-		"pgvector_dsn":     cfg.PGVectorDSN,
-		"tei_url":          cfg.TEIURL,
-		"voyage_model":     cfg.Voyage.Model,
-		"voyage_dim":       cfg.Voyage.Dim,
-		"voyage_api_key":   maskSecret(cfg.Voyage.APIKey),
-		"openai_base_url":  cfg.OpenAI.BaseURL,
-		"openai_model":     cfg.OpenAI.Model,
-		"openai_api_key":   maskSecret(cfg.OpenAI.APIKey),
-		"reranker_model":   cfg.RerankerModel,
-		"admin_token_set":  config.EffectiveAdminToken() != "",
-		"admin_token":      maskSecret(cfg.AdminToken),
+		"vector_store":    cfg.VectorStore,
+		"embedder":        cfg.Embedder,
+		"qdrant_url":      cfg.QdrantURL,
+		"qdrant_api_key":  maskSecret(cfg.QdrantAPIKey),
+		"chroma_url":      cfg.ChromaURL,
+		"pgvector_dsn":    cfg.PGVectorDSN,
+		"tei_url":         cfg.TEIURL,
+		"voyage_model":    cfg.Voyage.Model,
+		"voyage_dim":      cfg.Voyage.Dim,
+		"voyage_api_key":  maskSecret(cfg.Voyage.APIKey),
+		"openai_base_url": cfg.OpenAI.BaseURL,
+		"openai_model":    cfg.OpenAI.Model,
+		"openai_api_key":  maskSecret(cfg.OpenAI.APIKey),
+		"reranker_model":  cfg.RerankerModel,
+		"admin_token_set": token != "",
+		"admin_token":     maskSecret(cfg.AdminToken),
 	})
 }
 
@@ -74,13 +79,13 @@ func (h *Handlers) SetupConfigReveal(w http.ResponseWriter, r *http.Request) {
 // Gated (writes config.yaml with secrets).
 func (h *Handlers) SetupConfigUpdate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		VoyageAPIKey *string `json:"voyage_api_key"`
-		VoyageModel  *string `json:"voyage_model"`
-		QdrantAPIKey *string `json:"qdrant_api_key"`
-		OpenAIAPIKey *string `json:"openai_api_key"`
-		OpenAIModel  *string `json:"openai_model"`
+		VoyageAPIKey  *string `json:"voyage_api_key"`
+		VoyageModel   *string `json:"voyage_model"`
+		QdrantAPIKey  *string `json:"qdrant_api_key"`
+		OpenAIAPIKey  *string `json:"openai_api_key"`
+		OpenAIModel   *string `json:"openai_model"`
 		OpenAIBaseURL *string `json:"openai_base_url"`
-		AdminToken   *string `json:"admin_token"`
+		AdminToken    *string `json:"admin_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
@@ -131,11 +136,16 @@ func (h *Handlers) SetupGenToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "save config: "+err.Error())
 		return
 	}
-	envOverride := config.EffectiveAdminToken() != token // true if env var shadows it
+	effective, err := config.EffectiveAdminToken()
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "authentication configuration unavailable")
+		return
+	}
+	envOverride := effective != token // true if env var shadows it
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token":            token,
-		"saved":            true,
-		"env_override":     envOverride,
-		"note":             "Copy this now — it is stored in config.yaml (0600). If RAG_ADMIN_TOKEN is set in the environment, that value takes precedence at runtime.",
+		"token":        token,
+		"saved":        true,
+		"env_override": envOverride,
+		"note":         "Copy this now — it is stored in config.yaml (0600). If RAG_ADMIN_TOKEN is set in the environment, that value takes precedence at runtime.",
 	})
 }

@@ -47,3 +47,11 @@ vector-store or embedding requests, and secret exposure in logs or responses.
   `RAG_CORS_ORIGIN` — leave it unset in single-origin deployments.
 - Never commit `RAG_VOYAGE_API_KEY` or other secrets; pass them via the
   environment or your MCP client config.
+- Configure `RAG_GUARD_PROJECTS` for shared memory collections. The guard checks
+  known credential formats and explicit credential assignments in content,
+  identifiers, and metadata before embedding. Migration validates the complete
+  export before creating or writing its destination. This conservative check is
+  not a general PII classifier: authors must still keep private data in a vault.
+- Malformed or unreadable authentication configuration fails closed with HTTP
+  503. A missing configuration file still supports intentional local onboarding;
+  public deployments must set an admin token through the environment.

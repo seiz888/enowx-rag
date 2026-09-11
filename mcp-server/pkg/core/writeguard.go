@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -196,6 +197,14 @@ func (g *WriteGuard) Check(projectID string, docs []rag.Document) error {
 	}
 	var bad []string
 	for _, d := range docs {
+		if containsCredential(d.Content) || containsCredential(d.ID) {
+			return fmt.Errorf("write guard: credential-like content rejected before embedding; store sensitive material in the private vault")
+		}
+		for key, value := range d.Meta {
+			if containsCredential(value) || containsCredential(key+"="+value) {
+				return fmt.Errorf("write guard: credential-like metadata rejected before embedding; store sensitive material in the private vault")
+			}
+		}
 		id := d.ID
 		if id == "" {
 			id = "(tanpa id)"
@@ -234,6 +243,32 @@ func (g *WriteGuard) Check(projectID string, docs []rag.Document) error {
 	}
 	return fmt.Errorf("write guard menolak %d dari %d dokumen:\n  %s",
 		countBadDocs(bad), len(docs), strings.Join(msg, "\n  "))
+}
+
+// Fixed credential shapes and explicit assignments avoid treating topology,
+// checksums, and Git revisions as secrets. Errors never echo matched content.
+var credentialPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----`),
+	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`),
+	regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,})`),
+	regexp.MustCompile(`\b(?:cfk_[A-Za-z0-9]{30,}|v1\.0-[A-Za-z0-9_-]{30,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b`),
+	regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9_./+~-]{16,}`),
+	regexp.MustCompile(`(?i)\b(?:[A-Za-z0-9]+_)*(?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|admin[_-]?token|secret)\b["'\s]*[:=][\s"']*([A-Za-z0-9_./+!@#%^&*~-]{8,})`),
+}
+
+// ContainsCredential reports whether text carries something shaped like a
+// credential. It is exported so the memory gateway's ledger ingress scans with
+// the same patterns this guard uses; a second copy of the pattern list would
+// drift, and the copy that drifted would be the one that let something through.
+func ContainsCredential(text string) bool { return containsCredential(text) }
+
+func containsCredential(text string) bool {
+	for _, pattern := range credentialPatterns {
+		if pattern.MatchString(text) {
+			return true
+		}
+	}
+	return false
 }
 
 func countBadDocs(violations []string) int {

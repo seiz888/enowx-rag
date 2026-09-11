@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (no cgo)
@@ -17,6 +18,15 @@ type SQLiteMetricsStore struct {
 	db           *sql.DB
 	queryLogKeep int
 }
+
+// measurementVersion is the current latency measurement semantics, stamped on
+// every row this build writes. Version 1 rows (and any row written before the
+// column existed, which the ALTER backfills as 1) measured retrieval only —
+// rerank, per-doc capping and compression were excluded. Version 2 measures
+// the complete search end-to-end. Summary aggregates version 2 only so the two
+// distributions are never averaged together; version 1 rows are retained for
+// history but excluded from every aggregate the API reports.
+const measurementVersion = 2
 
 // NewSQLiteMetricsStore opens (creating if needed) a SQLite metrics database at
 // path and ensures the schema exists. Callers should Close it on shutdown.
@@ -44,6 +54,17 @@ CREATE TABLE IF NOT EXISTS query_metrics (
 );`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create metrics schema: %w", err)
+	}
+
+	// Existing databases (measurement version 1: retrieval-only latency) are
+	// migrated in place: the column is added with DEFAULT 1 so pre-existing
+	// rows keep their historical meaning, and new inserts stamp 2 explicitly.
+	if _, err := db.Exec(`
+ALTER TABLE query_metrics ADD COLUMN measurement_version INTEGER NOT NULL DEFAULT 1`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			return nil, fmt.Errorf("migrate metrics schema: %w", err)
+		}
 	}
 
 	// Separate table, not extra columns on query_metrics: the aggregate table is
@@ -134,18 +155,22 @@ func (s *SQLiteMetricsStore) Close() error { return s.db.Close() }
 func (s *SQLiteMetricsStore) PersistQueryMetric(ctx context.Context, latencyMs float64, comp QueryComposition) error {
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO query_metrics
-	(latency_ms, hybrid, reranked, candidates, results, dense_count, lexical_count, rerank_moved)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+	(latency_ms, hybrid, reranked, candidates, results, dense_count, lexical_count, rerank_moved, measurement_version)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		latencyMs, b2i(comp.Hybrid), b2i(comp.Reranked), comp.Candidates,
-		comp.Results, comp.DenseCount, comp.LexicalCount, comp.RerankMoved)
+		comp.Results, comp.DenseCount, comp.LexicalCount, comp.RerankMoved, measurementVersion)
 	return err
 }
 
-// Summary computes durable aggregates over all persisted queries. Percentiles
-// use SQLite's window functions over the latency column.
+// Summary computes durable aggregates over persisted queries measured with the
+// current semantics (end-to-end latency). Version 1 rows measured retrieval
+// only and are excluded: mixing the two distributions would report a p50/p95
+// that describes neither. Percentiles use nearest-rank over the latency column.
 func (s *SQLiteMetricsStore) Summary(ctx context.Context) (MetricsSummary, error) {
 	var out MetricsSummary
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(AVG(latency_ms), 0) FROM query_metrics`).
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(AVG(latency_ms), 0) FROM query_metrics WHERE measurement_version = ?`,
+		measurementVersion).
 		Scan(&out.QueryCount, &out.AvgLatencyMs)
 	if err != nil {
 		return out, err
@@ -164,8 +189,10 @@ func (s *SQLiteMetricsStore) percentile(ctx context.Context, p float64) float64 
 	var v float64
 	row := s.db.QueryRowContext(ctx, `
 SELECT latency_ms FROM query_metrics
+WHERE measurement_version = ?
 ORDER BY latency_ms
-LIMIT 1 OFFSET CAST(ROUND(? * (SELECT COUNT(*) - 1 FROM query_metrics)) AS INTEGER)`, p)
+LIMIT 1 OFFSET CAST(ROUND(? * (SELECT COUNT(*) - 1 FROM query_metrics WHERE measurement_version = ?)) AS INTEGER)`,
+		measurementVersion, p, measurementVersion)
 	if err := row.Scan(&v); err != nil {
 		return 0
 	}

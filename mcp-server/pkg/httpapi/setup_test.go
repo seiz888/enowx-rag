@@ -1000,7 +1000,7 @@ func TestMCPMount_Gated(t *testing.T) {
 
 	// With a token set: no/invalid bearer -> 401.
 	t.Setenv("RAG_ADMIN_TOKEN", "s3cret")
-	router := NewRouter(core.NewService(&mockProvider{}, nil, nil), nil, dummy)
+	router := NewRouter(core.NewService(&mockProvider{}, nil, nil), nil, dummy, nil)
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("{}"))
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1024,7 +1024,7 @@ func TestMCPMount_OpenWhenNoToken(t *testing.T) {
 	isolateHome(t, t.TempDir()) // no config token
 	t.Setenv("RAG_ADMIN_TOKEN", "")
 	dummy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	router := NewRouter(core.NewService(&mockProvider{}, nil, nil), nil, dummy)
+	router := NewRouter(core.NewService(&mockProvider{}, nil, nil), nil, dummy, nil)
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("{}"))
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)

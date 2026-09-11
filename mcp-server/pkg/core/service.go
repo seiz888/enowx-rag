@@ -320,7 +320,7 @@ func (s *Service) retrieveCandidates(ctx context.Context, projectID, query strin
 //  3. If the reranker fails, fall back to semantic order truncated to K.
 //  4. If no rerank, truncate to K.
 //
-// Defaults: K=5, Recall=40.
+// Defaults: K=5, Recall=25. Both are capped at 100 to bound reranking cost.
 func (s *Service) Search(ctx context.Context, projectID, query string, opts SearchOpts) ([]rag.Result, error) {
 	k := opts.K
 	if k <= 0 {
@@ -330,12 +330,16 @@ func (s *Service) Search(ctx context.Context, projectID, query string, opts Sear
 	if recall <= 0 {
 		recall = DefaultRecall
 	}
+	if recall > 100 {
+		recall = 100
+	}
+	if k > 100 {
+		k = 100
+	}
 
-	// Measure retrieval latency around the provider call only (excludes rerank,
-	// which is measured separately by the reranker's own metrics if needed).
+	// Record the complete search, including reranking and fallback processing.
 	t0 := time.Now()
 	cands, err := s.retrieveCandidates(ctx, projectID, query, recall, opts.Hybrid)
-	latencyMs := float64(time.Since(t0).Microseconds()) / 1000.0
 	if err != nil {
 		return nil, err
 	}
@@ -360,6 +364,7 @@ func (s *Service) Search(ctx context.Context, projectID, query string, opts Sear
 	// Record metrics once, at return, regardless of which branch produced out.
 	out := cands
 	defer func() {
+		latencyMs := float64(time.Since(t0).Microseconds()) / 1000.0
 		comp.Results = len(out)
 		s.metrics.RecordQuery(latencyMs, comp)
 		if s.metricsStore != nil {
@@ -684,6 +689,36 @@ func (s *Service) DeleteProject(ctx context.Context, projectID string) error {
 // optionally filtered by metadata.
 func (s *Service) ListPoints(ctx context.Context, projectID string, metaFilter map[string]string) ([]rag.PointInfo, error) {
 	return s.provider.ListPoints(ctx, projectID, metaFilter)
+}
+
+// ListPointsPage bounds external pages; full scans remain available to indexing.
+func (s *Service) ListPointsPage(ctx context.Context, projectID string, metaFilter map[string]string, offset, limit int) ([]rag.PointInfo, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if p, ok := s.provider.(interface {
+		ListPointsPage(context.Context, string, map[string]string, int, int) ([]rag.PointInfo, error)
+	}); ok {
+		return p.ListPointsPage(ctx, projectID, metaFilter, offset, limit)
+	}
+	points, err := s.provider.ListPoints(ctx, projectID, metaFilter)
+	if err != nil {
+		return nil, err
+	}
+	if offset >= len(points) {
+		return []rag.PointInfo{}, nil
+	}
+	points = points[offset:]
+	if len(points) > limit {
+		points = points[:limit]
+	}
+	return points, nil
 }
 
 // ExportProject returns every point of a project with full content and metadata,

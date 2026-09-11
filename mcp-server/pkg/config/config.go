@@ -53,15 +53,18 @@ type Config struct {
 
 // EffectiveAdminToken returns the admin token in effect: the RAG_ADMIN_TOKEN env
 // var if set, otherwise the value saved in the config file. Empty means no auth.
-func EffectiveAdminToken() string {
+func EffectiveAdminToken() (string, error) {
 	if v := os.Getenv("RAG_ADMIN_TOKEN"); v != "" {
-		return v
+		return v, nil
 	}
 	cfg, err := Load()
 	if err != nil {
-		return ""
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
 	}
-	return cfg.AdminToken
+	return cfg.AdminToken, nil
 }
 
 // Default returns a Config populated with built-in default values. These are
