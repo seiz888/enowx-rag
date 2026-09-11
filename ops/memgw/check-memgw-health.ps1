@@ -166,6 +166,28 @@ try {
     }
 }
 
+# --- off-host backup freshness ---------------------------------------------
+# A backup that silently stopped is the failure this whole check exists for.
+# The sealed copies are the off-host record; their newest age is the real RPO
+# signal, so anything older than the warn/fail thresholds is reported.
+$sealedDir = 'D:\memgw-backups\vps\sealed'
+$backupWarn = [TimeSpan]::FromHours(30)
+$backupFail = [TimeSpan]::FromHours(72)
+$newest = Get-ChildItem -LiteralPath $sealedDir -Filter '*.aes' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($null -eq $newest) {
+    Add-Check 'offhost-backup' 'fail' "no sealed backup in $sealedDir"
+} else {
+    $age = (Get-Date) - $newest.LastWriteTime
+    if ($age -ge $backupFail) {
+        Add-Check 'offhost-backup' 'fail' "newest sealed backup is $([int]$age.TotalHours)h old ($($newest.Name))"
+    } elseif ($age -ge $backupWarn) {
+        Add-Check 'offhost-backup' 'warn' "newest sealed backup is $([int]$age.TotalHours)h old ($($newest.Name))"
+    } else {
+        Add-Check 'offhost-backup' 'ok' "newest sealed backup $($newest.Name) ($([int]$age.TotalHours)h old)"
+    }
+}
+
 # --- report ----------------------------------------------------------------
 $worst = 'ok'
 foreach ($c in $checks) {
