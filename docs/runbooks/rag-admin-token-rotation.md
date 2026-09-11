@@ -1,8 +1,12 @@
 # Runbook — rotating `RAG_ADMIN_TOKEN`
 
-> **Prepared, not executed.** No step below has been run. Rotation is a
-> production secret change plus an nginx edit plus a service restart, and it
-> needs the operator's approval and hands.
+> **EXECUTED — 2026-09-11.** Rotation was performed across all reachable
+> consumers. The token was generated on the host (`openssl rand -hex 32`) and
+> never printed; the nginx cleartext copies were replaced by a `0600`
+> root-readable include. Verified: old value `401`, new value `200`, on both
+> the loopback and the public endpoint, and the nginx-injected dashboard path.
+> The steps below remain the procedure; §2's optional structural change (move
+> the token out of the inline config) is now the state that shipped.
 
 `RAG_ADMIN_TOKEN` is treated as **compromised**: it sits in cleartext in two
 nginx site configs and it was rendered into a session transcript on 2026-09-09.
@@ -49,10 +53,13 @@ Not consumers: OMP/Pi and Hermes have no enowx-rag MCP entry.
 Server before nginx: the reverse order has nginx forwarding a new token to a
 server that still expects the old one, and the failure looks like an outage.
 
-If approved as part of the same window, move the token out of the inline config
-into a `0600` file pulled in with `include`, so it is not sitting in a config
-that gets read casually. That is a structural change to nginx and needs its own
-approval.
+**Done on 2026-09-11.** The token no longer sits inline in either vhost. It
+lives in `/etc/nginx/.rag-admin-token` (mode `0600`, owner `root:root`) as a
+`map $host $rag_admin_token { default "..."; }` fragment, and each vhost starts
+with `include /etc/nginx/.rag-admin-token;` and sends
+`proxy_set_header Authorization "Bearer $rag_admin_token"`. To rotate again,
+rewrite that one file and `nginx -t && systemctl reload nginx`; the vhosts do
+not change.
 
 ## 3. Validation that needs no token at all
 
