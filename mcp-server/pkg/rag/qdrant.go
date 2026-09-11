@@ -169,8 +169,8 @@ func (p *QdrantProvider) SemanticSearch(ctx context.Context, projectID, query st
 	}
 
 	body := map[string]any{
-		"vector":      vec,
-		"limit":       limit,
+		"vector":       vec,
+		"limit":        limit,
 		"with_payload": true,
 	}
 
@@ -229,7 +229,16 @@ func (p *QdrantProvider) DeletePoints(ctx context.Context, projectID string, poi
 	if len(pointIDs) == 0 {
 		return nil
 	}
-	body := map[string]any{"points": pointIDs}
+	// Upsert stores a document under pointID(d.ID), so a deletion has to go
+	// through the same mapping or it names a point that was never written.
+	// Callers that already hold Qdrant ids are unaffected: pointID returns a
+	// UUID unchanged. Without this, deleting by document id fails outright on
+	// a human-readable id and, worse, would silently reach nothing.
+	ids := make([]string, len(pointIDs))
+	for i, raw := range pointIDs {
+		ids[i] = pointID(raw)
+	}
+	body := map[string]any{"points": ids}
 	return p.do(ctx, http.MethodPost, "/collections/"+p.collectionName(projectID)+"/points/delete?wait=true", body, nil)
 }
 
@@ -248,6 +257,14 @@ func (p *QdrantProvider) ListPointIDs(ctx context.Context, projectID string, met
 // ListPoints scrolls all points (optionally filtered by metadata), returning
 // each point's Qdrant ID and its source_file, content_hash, and doc_id payload.
 func (p *QdrantProvider) ListPoints(ctx context.Context, projectID string, metaFilter map[string]string) ([]PointInfo, error) {
+	return p.ListPointsPage(ctx, projectID, metaFilter, 0, 0)
+}
+
+// ListPointsPage stops scrolling once the requested page is complete.
+// offset is a positional count (REST callers page by index); Qdrant's scroll
+// cursor is a point ID, so skipped positions are counted but never retained.
+// A zero limit is reserved for internal index bookkeeping (full scan).
+func (p *QdrantProvider) ListPointsPage(ctx context.Context, projectID string, metaFilter map[string]string, offset, pageLimit int) ([]PointInfo, error) {
 	name := p.collectionName(projectID)
 	must := []map[string]any{}
 	for k, v := range metaFilter {
@@ -257,12 +274,22 @@ func (p *QdrantProvider) ListPoints(ctx context.Context, projectID string, metaF
 		})
 	}
 
+	// Bounded request: never scroll more points than skip + page needs.
+	scrollLimit := 256
+	if pageLimit > 0 {
+		scrollLimit = offset + pageLimit
+	}
+	if scrollLimit > 256 {
+		scrollLimit = 256
+	}
 	var all []PointInfo
+	if pageLimit > 0 {
+		all = make([]PointInfo, 0, pageLimit)
+	}
 	var scrollOffset any = nil
-	limit := 256
 	for {
 		body := map[string]any{
-			"limit":        limit,
+			"limit":        scrollLimit,
 			"with_payload": true,
 			"with_vector":  false,
 		}
@@ -275,7 +302,7 @@ func (p *QdrantProvider) ListPoints(ctx context.Context, projectID string, metaF
 		var resp struct {
 			Result struct {
 				Points []struct {
-					ID      any `json:"id"`
+					ID      any            `json:"id"`
 					Payload map[string]any `json:"payload"`
 				} `json:"points"`
 				NextOffset any `json:"next_page_offset"`
@@ -285,7 +312,15 @@ func (p *QdrantProvider) ListPoints(ctx context.Context, projectID string, metaF
 			return nil, fmt.Errorf("qdrant scroll: %w", err)
 		}
 		for _, pt := range resp.Result.Points {
+			if offset > 0 {
+				offset--
+				continue
+			}
+			if pageLimit > 0 && len(all) >= pageLimit {
+				break
+			}
 			pi := PointInfo{
+				// Conversion occurs only for points retained in the page.
 				ID: fmt.Sprintf("%v", pt.ID),
 			}
 			if v, ok := pt.Payload["source_file"].(string); ok {
@@ -324,7 +359,7 @@ func (p *QdrantProvider) ListPoints(ctx context.Context, projectID string, metaF
 			}
 			all = append(all, pi)
 		}
-		if resp.Result.NextOffset == nil {
+		if resp.Result.NextOffset == nil || (pageLimit > 0 && len(all) >= pageLimit) {
 			break
 		}
 		scrollOffset = resp.Result.NextOffset
