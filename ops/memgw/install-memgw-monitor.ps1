@@ -43,6 +43,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'Memgw.Common.ps1')
+
 $script:MemgwRoot = 'D:\memgw'
 $taskPath = '\memgw\'
 $taskName = 'healthcheck'
@@ -71,11 +73,9 @@ if (-not (Test-Path -LiteralPath $checkScript)) { throw "health check script not
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
-$powershell = (Get-Command powershell.exe).Source
-$action = New-ScheduledTaskAction `
-    -Execute $powershell `
-    -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $checkScript) `
-    -WorkingDirectory $script:MemgwRoot
+# Windowless: a direct powershell.exe action creates a console, and this task
+# repeats every five minutes. See New-MemgwHiddenScriptAction.
+$action = New-MemgwHiddenScriptAction -ScriptPath $checkScript
 
 # Every 5 minutes, indefinitely, plus at logon so a fresh boot is covered
 # before the first interval elapses.
@@ -134,11 +134,9 @@ Write-Host "manifest  : $manifestPath"
 if ($SkipVerify) { exit 0 }
 
 Write-Host 'verifying: running the check once...'
-$verify = Start-Process -FilePath $powershell `
-    -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $checkScript) `
-    -PassThru -Wait -WindowStyle Hidden
-Write-Host "verification exit: $($verify.ExitCode) (0=ok, 1=warn, 2=fail)"
-if ($verify.ExitCode -eq 2) {
+$verifyExit = Start-MemgwHiddenScript -ScriptPath $checkScript
+Write-Host "verification exit: $verifyExit (0=ok, 1=warn, 2=fail)"
+if ($verifyExit -eq 2) {
     throw 'the health check reports a failing state; fix it before relying on the task'
 }
 Write-Host 'verification OK'

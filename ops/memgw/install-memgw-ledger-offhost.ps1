@@ -47,6 +47,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Security
 
+. (Join-Path $PSScriptRoot 'Memgw.Common.ps1')
+
 $root = 'D:\memgw'
 $taskPath = '\memgw\'
 $taskName = 'ledger-offhost'
@@ -72,11 +74,8 @@ if (-not (Test-Path -LiteralPath $script)) { throw "off-host copy script not fou
 
 New-Item -ItemType Directory -Force -Path (Join-Path $root 'run') | Out-Null
 
-$powershell = (Get-Command powershell.exe).Source
-$action = New-ScheduledTaskAction `
-    -Execute $powershell `
-    -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $script) `
-    -WorkingDirectory $root
+# Windowless action; see New-MemgwHiddenScriptAction.
+$action = New-MemgwHiddenScriptAction -ScriptPath $script
 
 $daily = New-ScheduledTaskTrigger -Daily -At '03:30'
 $logon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
@@ -116,9 +115,7 @@ Write-Host "manifest  : $manifestPath"
 if ($SkipVerify) { exit 0 }
 
 Write-Host 'verifying: running the off-host copy once...'
-$v = Start-Process -FilePath $powershell `
-    -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $script) `
-    -PassThru -Wait -WindowStyle Hidden
-Write-Host "verification exit: $($v.ExitCode)"
-if ($v.ExitCode -ne 0) { throw "the off-host ledger copy failed (exit $($v.ExitCode))" }
+$verifyExit = Start-MemgwHiddenScript -ScriptPath $script
+Write-Host "verification exit: $verifyExit"
+if ($verifyExit -ne 0) { throw "the off-host ledger copy failed (exit $verifyExit)" }
 Write-Host 'verification OK'

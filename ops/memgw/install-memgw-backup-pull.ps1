@@ -25,6 +25,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Security
 
+. (Join-Path $PSScriptRoot 'Memgw.Common.ps1')
+
 $taskPath = '\memgw\'
 $taskName = 'backup-pull'
 $fullName = "$taskPath$taskName"
@@ -50,11 +52,8 @@ if (-not (Test-Path -LiteralPath $script)) { throw "pull script not found: $scri
 
 New-Item -ItemType Directory -Force -Path (Join-Path $root 'run') | Out-Null
 
-$powershell = (Get-Command powershell.exe).Source
-$action = New-ScheduledTaskAction `
-    -Execute $powershell `
-    -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $script) `
-    -WorkingDirectory $root
+# Windowless action; see New-MemgwHiddenScriptAction.
+$action = New-MemgwHiddenScriptAction -ScriptPath $script
 
 # Daily at 11:00 local; the VPS stages at 02:40 UTC. Local time here is UTC+7,
 # so 11:00 local is 04:00 UTC, after the staging run. At logon covers a machine
@@ -105,7 +104,7 @@ Write-Host "manifest  : $manifestPath"
 
 if ($SkipVerify) { exit 0 }
 Write-Host 'verifying: running the pull once...'
-$v = Start-Process -FilePath $powershell -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$script) -PassThru -Wait -WindowStyle Hidden
-Write-Host "verification exit: $($v.ExitCode) (0=ok, 2=checksum failure)"
-if ($v.ExitCode -eq 2) { throw 'the pull reported a checksum failure' }
+$verifyExit = Start-MemgwHiddenScript -ScriptPath $script
+Write-Host "verification exit: $verifyExit (0=ok, 2=checksum failure)"
+if ($verifyExit -eq 2) { throw 'the pull reported a checksum failure' }
 Write-Host 'verification OK'

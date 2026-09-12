@@ -76,7 +76,7 @@ if ($Json) {
         tasks         = $tasks
         processes     = $procs
         gateway_ready = $gatewayReady
-        gateway_addr  = $script:MemgwGatewayAddr
+        gateway_addr  = $script:MemgwLocalGatewayAddr
         gateway_dsn   = Get-MemgwRedactedDsn
         queues        = $queues
         checked_at    = (Get-Date).ToString('o')
@@ -99,7 +99,7 @@ if (-not $procs) {
 }
 
 Write-Host '=== gateway ==='
-Write-Host "  address : $script:MemgwGatewayAddr"
+Write-Host "  address : $script:MemgwLocalGatewayAddr"
 Write-Host "  dsn     : $(Get-MemgwRedactedDsn)  (redacted; no credential shown)"
 Write-Host "  ready   : $gatewayReady"
 Write-Host ''

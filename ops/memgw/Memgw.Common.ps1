@@ -35,14 +35,40 @@ $script:MemgwSecrets = Join-Path $script:MemgwRoot 'secrets'
 $script:MemgwLogs   = Join-Path $script:MemgwRoot 'logs'
 $script:MemgwOps    = $PSScriptRoot
 
-# The collector spools, one directory per host, as the current processes use.
+# The collector spools, one directory per host.
+#
+# All five hosts have a collector: a lifecycle event that fires while the
+# gateway is unreachable is held in that host's encrypted spool and forwarded
+# when it returns. Until the migration, only claude and omp had one, so codex,
+# droid and opencode submitted straight to the gateway and an event fired
+# during an outage was simply lost. A cutover window is exactly such an outage,
+# which is why these three are added before the clients move rather than after.
+#
+# Per-host isolation is the point: each collector has its own spool directory,
+# its own named pipe and its own principal token, so one host's queue can never
+# be drained under another host's identity.
 $script:MemgwCollectors = @(
-    @{ Name = 'claude'; Dir = 'D:\memgw\collector\claude'; Pipe = '\\.\pipe\memgw-collector-claude'; Token = 'D:\memgw\secrets\claude.token' }
-    @{ Name = 'omp';    Dir = 'D:\memgw\collector\omp';    Pipe = '\\.\pipe\memgw-collector-omp';    Token = 'D:\memgw\secrets\omp.token' }
+    @{ Name = 'claude';   Dir = 'D:\memgw\collector\claude';   Pipe = '\\.\pipe\memgw-collector-claude';   Token = 'D:\memgw\secrets\claude.token' }
+    @{ Name = 'omp';      Dir = 'D:\memgw\collector\omp';      Pipe = '\\.\pipe\memgw-collector-omp';      Token = 'D:\memgw\secrets\omp.token' }
+    @{ Name = 'codex';    Dir = 'D:\memgw\collector\codex';    Pipe = '\\.\pipe\memgw-collector-codex';    Token = 'D:\memgw\secrets\codex.token' }
+    @{ Name = 'droid';    Dir = 'D:\memgw\collector\droid';    Pipe = '\\.\pipe\memgw-collector-droid';    Token = 'D:\memgw\secrets\droid.token' }
+    @{ Name = 'opencode'; Dir = 'D:\memgw\collector\opencode'; Pipe = '\\.\pipe\memgw-collector-opencode'; Token = 'D:\memgw\secrets\opencode.token' }
 )
 
-$script:MemgwGatewayAddr = '127.0.0.1:7791'
-$script:MemgwGatewayUrl  = 'http://127.0.0.1:7791'
+# Where the collectors send. This is the single client-side cutover point: it was
+# the workstation gateway on loopback, and after the migration it is the VPS. The
+# value is an ORIGIN with no path -- the binary appends /memgw/v1/... itself, so
+# including /memgw here would produce /memgw/memgw/v1/... and every submit would
+# fail as a route miss.
+$script:MemgwGatewayUrl = 'https://rag.seiz.cloud'
+
+# The retired local gateway. Only the gateway+collectors path uses these, and that
+# path is no longer the registered one (the supervisor runs -CollectorsOnly because
+# the VPS is now authoritative for the ledger). Kept so a rollback can still bring
+# the local stack up, and kept distinct from the URL above so that "where collectors
+# send" can never silently become "where a local gateway is probed".
+$script:MemgwLocalGatewayAddr = '127.0.0.1:7791'
+$script:MemgwLocalGatewayUrl  = 'http://127.0.0.1:7791'
 
 # --- Logging ---------------------------------------------------------------
 
@@ -183,7 +209,12 @@ function Test-MemgwGatewayReady {
             # must run on Windows PowerShell 5.1, which has no
             # -SkipHttpErrorCheck: a 401 would become a terminating error and
             # the probe would read "not ready" for a gateway that is serving.
-            $req = [System.Net.HttpWebRequest]::Create("$script:MemgwGatewayUrl/memgw/v1/health")
+            # Probes the LOCAL gateway, because that is the one Start-MemgwGateway
+            # starts and the one this readiness wait guards. The remote endpoint is
+            # the collectors' destination and is not started by this process; asking
+            # it to be ready here would make the local stack unstartable whenever the
+            # VPS was slow, for a dependency it does not have.
+            $req = [System.Net.HttpWebRequest]::Create("$script:MemgwLocalGatewayUrl/memgw/v1/health")
             $req.Method = 'GET'
             $req.Timeout = 3000
             $req.AllowAutoRedirect = $false
@@ -310,8 +341,8 @@ function Start-MemgwGateway {
     param()
     Initialize-MemgwLogs
     $env = New-MemgwGatewayEnvironment
-    $p = Start-MemgwHidden -ArgumentList @('memgw', 'serve', '--addr', $script:MemgwGatewayAddr) -Environment $env
-    Write-MemgwLog -Name 'gateway' -Level 'info' -Message "started pid=$($p.Id) addr=$script:MemgwGatewayAddr dsn=$(Get-MemgwRedactedDsn)"
+    $p = Start-MemgwHidden -ArgumentList @('memgw', 'serve', '--addr', $script:MemgwLocalGatewayAddr) -Environment $env
+    Write-MemgwLog -Name 'gateway' -Level 'info' -Message "started pid=$($p.Id) addr=$script:MemgwLocalGatewayAddr dsn=$(Get-MemgwRedactedDsn)"
     return $p
 }
 
@@ -535,7 +566,139 @@ function Get-MemgwCollectorStats {
     }
 }
 
+function Start-MemgwHiddenScript {
+    <#
+    .SYNOPSIS
+        Run a .ps1 windowless and return its exit code, for installer checks.
+    .DESCRIPTION
+        Same launcher the registered task uses, so the verification exercises
+        the real path. Start-Process -Wait rather than the call operator:
+        wscript.exe is GUI-subsystem and `&` neither waits for one nor sets
+        $LASTEXITCODE.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [string[]]$ExtraArgs = @()
+    )
+
+    if (-not (Test-Path -LiteralPath $ScriptPath)) {
+        throw "script not found: $ScriptPath"
+    }
+    if ($ScriptPath -match '"' -or ($ExtraArgs | Where-Object { $_ -match '"' })) {
+        throw 'a double quote is not supported in a task argument value'
+    }
+
+    $powershell = (Get-Command powershell.exe).Source
+    $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    # Quoted here: Start-Process -ArgumentList joins its array with spaces and
+    # does not quote for you, so an unquoted path with a space would be split
+    # into two arguments and the run would fail with a meaningless code.
+    $args = @(
+        '//B', '//Nologo', (ConvertTo-MemgwArg -Value $script:MemgwSilentLauncher)
+        (ConvertTo-MemgwArg -Value $powershell)
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass'
+        '-WindowStyle', 'Hidden', '-File', (ConvertTo-MemgwArg -Value $ScriptPath)
+    ) + ($ExtraArgs | ForEach-Object { ConvertTo-MemgwArg -Value $_ })
+
+    $p = Start-Process -FilePath $wscript -ArgumentList $args -PassThru -Wait -WindowStyle Hidden
+    return $p.ExitCode
+}
+
 # --- Task identity ---------------------------------------------------------
+
+$script:MemgwSilentLauncher = Join-Path $MemgwOps 'memgw-silent-launch.vbs'
+
+function New-MemgwHiddenScriptAction {
+    <#
+    .SYNOPSIS
+        Windowless action for one of this toolkit's own .ps1 files.
+    .DESCRIPTION
+        The memgw installers all run a PowerShell script under the same fixed
+        flags, so the executable and its argv are named once here. A task that is
+        NOT ours -- rag-backup-pull runs pwsh.exe -- must use
+        New-MemgwHiddenAction with its own original argv instead.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [string[]]$ExtraArgs = @(),
+        [AllowEmptyString()][string]$WorkingDirectory = $script:MemgwRoot
+    )
+    $argv = @(
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass'
+        '-WindowStyle', 'Hidden', '-File', $ScriptPath
+    ) + $ExtraArgs
+    return New-MemgwHiddenAction -Executable (Get-Command powershell.exe).Source `
+        -Arguments $argv -WorkingDirectory $WorkingDirectory
+}
+
+function New-MemgwHiddenAction {
+    <#
+    .SYNOPSIS
+        Wrap an executable and its argv in a windowless Scheduled Task action.
+    .DESCRIPTION
+        A task action that is a console-subsystem image (powershell.exe, pwsh.exe,
+        python.exe) gets a console from Windows; -WindowStyle Hidden only hides
+        the host window, so the console still appears as a terminal window on
+        every run. Routing through memgw-silent-launch.vbs avoids creating one,
+        and the child's exit code still reaches "Last Run Result".
+
+        The executable and its arguments are wrapped VERBATIM. Nothing about the
+        program's own options is chosen here, because converting an existing task
+        must not change its semantics: pwsh.exe and powershell.exe are different
+        programs with different native-command stdout handling, and substituting
+        one for the other is a real behaviour change -- PS 5.1's UTF-16LE
+        redirect is what corrupted a pg_dump in this fleet before.
+    .PARAMETER Executable
+        The program to run.
+    .PARAMETER Arguments
+        Its arguments, exactly as the task should pass them.
+    .PARAMETER WorkingDirectory
+        Working directory for the action. Empty means none, which is a real state
+        an existing task may be in; the argument is then omitted.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Executable,
+        [string[]]$Arguments = @(),
+        [AllowEmptyString()][string]$WorkingDirectory = $script:MemgwRoot
+    )
+
+    if (-not (Test-Path -LiteralPath $Executable)) {
+        throw "executable not found: $Executable"
+    }
+    if (-not (Test-Path -LiteralPath $script:MemgwSilentLauncher)) {
+        throw "silent launcher not found: $($script:MemgwSilentLauncher)"
+    }
+
+    # A value carrying a double quote is refused rather than re-quoted: the
+    # launcher is a Windows Script Host script whose own command-line splitter
+    # does not honour backslash-escaped quotes, so such a value would arrive
+    # corrupted. Refusing here keeps the helper honest about that limit instead
+    # of installing an action that silently passes a wrong argument.
+    foreach ($x in @($Executable) + $Arguments) {
+        if ($x -match '"') {
+            throw "a double quote is not supported in a task argument value: $x"
+        }
+    }
+
+    $argument = @(
+        '//B'
+        '//Nologo'
+        ConvertTo-MemgwArg -Value $script:MemgwSilentLauncher
+        ConvertTo-MemgwArg -Value $Executable
+    ) + ($Arguments | ForEach-Object { ConvertTo-MemgwArg -Value $_ })
+
+    # New-ScheduledTaskAction rejects an empty -WorkingDirectory, and "no working
+    # directory" is a real state an existing task may be in.
+    $params = @{
+        Execute  = Join-Path $env:SystemRoot 'System32\wscript.exe'
+        Argument = ($argument -join ' ')
+    }
+    if ($WorkingDirectory) { $params.WorkingDirectory = $WorkingDirectory }
+    return New-ScheduledTaskAction @params
+}
 
 function Get-MemgwTaskHash {
     <#

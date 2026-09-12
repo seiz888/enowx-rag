@@ -41,7 +41,21 @@ param(
     # Start and verify, then exit. The installer uses this to prove the tasks work.
     [switch]$Once,
     # Seconds between health polls in supervised mode.
-    [int]$PollSeconds = 5
+    [int]$PollSeconds = 5,
+    # Supervise the collectors only: do not start, restart or require the local
+    # gateway, and do not bring up the ledger containers.
+    #
+    # This is the shape the stack takes AFTER the canonical ledger moves to the
+    # VPS. The PC keeps its hooks, its five per-principal collectors and their
+    # encrypted spools; the gateway becomes somebody else's process and the
+    # local one must not be started, because a second admitted writer is the one
+    # failure this whole migration is arranged to prevent.
+    #
+    # It is PREPARED here, not activated. The default is unchanged, so nothing
+    # about today's behaviour moves until the cutover is coordinated: flipping
+    # this needs the old authority fenced first, and starting it early would
+    # leave the collectors with no reachable gateway on the ordinary path.
+    [switch]$CollectorsOnly
 )
 
 Set-StrictMode -Version Latest
@@ -85,6 +99,29 @@ function Start-AllVerified {
 
     $existing = Get-Supervised
 
+    if ($CollectorsOnly) {
+        # No containers, no gateway: the ledger and the gateway are not this
+        # process's business any more. Collectors are the whole job, so a
+        # gateway that is absent is expected rather than an error.
+        Write-MemgwLog -Name 'ops' -Message 'supervisor: collectors-only mode; gateway and containers are not supervised'
+        $okOnly = $true
+        foreach ($c in $script:MemgwCollectors) {
+            $key = "collector:$($c.Name)"
+            if ($existing.ContainsKey($key)) {
+                Write-MemgwLog -Name $c.Name -Message "already running pid=$($existing[$key].ProcId)"
+            } else {
+                [void](Start-MemgwCollector -Collector $c)
+            }
+            if (-not (Test-MemgwCollectorPipeReady -Pipe $c.Pipe -TimeoutSeconds 20)) {
+                Write-MemgwLog -Name $c.Name -Level 'error' -Message "pipe did not appear: $($c.Pipe)"
+                $okOnly = $false
+            } else {
+                Write-MemgwLog -Name $c.Name -Message "pipe ready: $($c.Pipe)"
+            }
+        }
+        return $okOnly
+    }
+
     # --- Containers before anything ---------------------------------------
     # The gateway is useless without its ledger: it starts, then fails every
     # commit. Bringing the containers up first -- and waiting for the ledger to
@@ -106,7 +143,7 @@ function Start-AllVerified {
         Write-MemgwLog -Name 'gateway' -Level 'error' -Message 'gateway did not become ready within 30s'
         return $false
     }
-    Write-MemgwLog -Name 'gateway' -Message "ready at $script:MemgwGatewayAddr"
+    Write-MemgwLog -Name 'gateway' -Message "ready at $script:MemgwLocalGatewayAddr"
 
     # --- Collectors only now ----------------------------------------------
     $ok = $true
@@ -137,7 +174,8 @@ if ($Once) {
     exit 1
 }
 
-Write-MemgwLog -Name 'ops' -Message "supervisor: entering supervised mode (poll ${PollSeconds}s, stop file $stopFile)"
+$mode = if ($CollectorsOnly) { 'collectors-only' } else { 'gateway+collectors' }
+Write-MemgwLog -Name 'ops' -Message "supervisor: entering supervised mode ($mode, poll ${PollSeconds}s, stop file $stopFile)"
 
 # Remove a stale stop file from a previous uninstall so a fresh install is not
 # immediately stopped by an earlier run's marker.
@@ -148,6 +186,21 @@ if (Test-Path -LiteralPath $stopFile) { Remove-Item -LiteralPath $stopFile -Forc
 while (-not (Test-Path -LiteralPath $stopFile)) {
     Start-Sleep -Seconds $PollSeconds
     try {
+        if ($CollectorsOnly) {
+            # Only the collectors are watched. Nothing here starts or requires
+            # the local gateway or the ledger containers.
+            $onlyRunning = Get-Supervised
+            foreach ($c in $script:MemgwCollectors) {
+                if (-not $onlyRunning.ContainsKey("collector:$($c.Name)")) {
+                    Write-MemgwLog -Name $c.Name -Level 'warn' -Message 'collector is gone; restarting'
+                    [void](Start-MemgwCollector -Collector $c)
+                    if (-not (Test-MemgwCollectorPipeReady -Pipe $c.Pipe -TimeoutSeconds 20)) {
+                        Write-MemgwLog -Name $c.Name -Level 'error' -Message "restarted collector did not open its pipe: $($c.Pipe)"
+                    }
+                }
+            }
+            continue
+        }
         # A container that died mid-run looks exactly like a healthy gateway
         # with nowhere to write, so it is checked before the processes. If the
         # ledger is gone the gateway is restarted too: it may have a broken

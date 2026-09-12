@@ -119,14 +119,15 @@ Write-MemgwLog -Name 'ops' -Message "install: backed up pre-existing memgw task 
 # --- Build the action ------------------------------------------------------
 
 $supervisor = Join-Path $PSScriptRoot 'memgw-supervisor.ps1'
-$powershell = (Get-Command powershell.exe).Source
 
+# Windowless action; see New-MemgwHiddenScriptAction. The supervisor already starts
+# its own children with Start-MemgwHidden (CreateNoWindow), so no popup ever
+# came from the supervised stack -- only from this task's own action, which
+# created a console for powershell.exe at every logon.
 # -NoProfile so a user profile cannot alter behaviour at logon; -ExecutionPolicy
-# Bypass because the script is unsigned and lives on a local fixed disk.
-$action = New-ScheduledTaskAction `
-    -Execute $powershell `
-    -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $supervisor) `
-    -WorkingDirectory $script:MemgwRoot
+# Bypass because the script is unsigned and lives on a local fixed disk (both
+# are supplied by New-MemgwHiddenScriptAction).
+$action = New-MemgwHiddenScriptAction -ScriptPath $supervisor
 
 # At logon of the installing user: the same account that owns the spool, the
 # token files and the agent sessions. No stored password, no SYSTEM, no
@@ -151,7 +152,7 @@ $principal = New-ScheduledTaskPrincipal `
 if ($WhatIfPreference) {
     Write-Host 'WhatIf: would register'
     Write-Host "  task    : $fullName"
-    Write-Host "  execute : $powershell"
+    Write-Host "  execute : $($action.Execute)"
     Write-Host "  args    : $($action.Arguments)"
     Write-Host '  trigger : at logon'
     Write-Host ''
@@ -208,13 +209,11 @@ if ($SkipVerify) {
 }
 
 Write-Host 'verifying: starting supervisor one-shot...'
-$verify = Start-Process -FilePath $powershell `
-    -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $supervisor, '-Once') `
-    -PassThru -Wait -WindowStyle Hidden
+$verifyExit = Start-MemgwHiddenScript -ScriptPath $supervisor -ExtraArgs @('-Once')
 
-if ($verify.ExitCode -ne 0) {
-    Write-MemgwLog -Name 'ops' -Level 'error' -Message "install: one-shot verification failed exit=$($verify.ExitCode)"
-    throw "one-shot verification failed (exit $($verify.ExitCode)); see $script:MemgwLogs\ops.log"
+if ($verifyExit -ne 0) {
+    Write-MemgwLog -Name 'ops' -Level 'error' -Message "install: one-shot verification failed exit=$verifyExit"
+    throw "one-shot verification failed (exit $verifyExit); see $script:MemgwLogs\ops.log"
 }
 Write-MemgwLog -Name 'ops' -Message 'install: one-shot verification OK'
 Write-Host 'verification OK: gateway answered and collector pipes opened'
