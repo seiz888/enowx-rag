@@ -7,22 +7,39 @@
 
         \memgw\supervisor
 
-    which starts the gateway, waits for it to answer, starts the per-principal
-    collectors, and then keeps them alive (see memgw-supervisor.ps1).
+    which starts the per-principal collectors and keeps them alive (see
+    memgw-supervisor.ps1). It runs in COLLECTORS-ONLY mode: the collectors
+    forward to the authoritative gateway named in Memgw.Common.ps1 (the
+    remote VPS), so this workstation no longer starts or depends on a local
+    gateway or a local ledger.
+
+    Why collectors-only is the ordinary install
+    -------------------------------------------
+    The ledger's authority moved off this workstation. A supervisor that also
+    started a local gateway would resurrect a second writer against a stopped
+    local database, and every hook would then have two possible destinations
+    with only one of them correct. The ordinary install therefore supervises
+    exactly the collectors -- the only local component that still has a job.
+    Bringing the local stack up is a deliberate rollback action, not an
+    installer side effect; see D:\memgw\run\cutover-state.txt.
 
     Why one task and not three
     --------------------------
-    The gateway must be ready before a collector accepts a hook. Three
-    independent tasks would race that ordering on every logon. One supervisor
-    task owns the order once, in one place, where it can be read.
+    Three independent tasks would race their own startup and any of them could
+    be the one that is missing after a reboot. One supervisor task owns the
+    set once, in one place, where it can be read.
 
     Why no secrets in the task
     --------------------------
-    The task action runs a script by path with no arguments. The gateway's DSN
-    is composed inside the runspace from D:\memgw\secrets\pg_app, and each
-    collector names its credential with --token-file. Nothing sensitive is in
-    the action, the arguments, the Task Scheduler history, or any process
-    command line.
+    The task action runs a script by path plus a fixed mode flag. Each
+    collector names its credential with --token-file, and the collector reads
+    the secret itself. Nothing sensitive is in the action, the arguments, the
+    Task Scheduler history, or any process command line.
+
+    Notably there is NO local database secret here any more: this install does
+    not compose a DSN, because it does not start anything that needs one. That
+    dependency is what made a client install fail on a machine whose local
+    ledger had been retired.
 
     Reversibility
     -------------
@@ -52,6 +69,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'Memgw.Common.ps1')
+
+# The mode this task runs in permanently. Named once so the registered argv and
+# the verification run below cannot drift apart.
+$supervisorArgs = @('-CollectorsOnly')
 
 $taskPath = '\memgw\'
 $taskName = 'supervisor'
@@ -83,9 +104,12 @@ Write-Host ''
 # --- Preconditions ---------------------------------------------------------
 
 if (-not (Test-Path -LiteralPath $script:MemgwBin)) { throw "binary not found: $script:MemgwBin" }
-foreach ($s in @('pg_app', 'claude.token', 'omp.token')) {
+# Per-host collector credentials only. pg_app (the local ledger password) is
+# deliberately absent: this install starts no local gateway, so requiring it
+# would block installation on a correctly-migrated client.
+foreach ($s in @('claude.token', 'omp.token', 'codex.token', 'droid.token', 'opencode.token')) {
     $p = Join-Path $script:MemgwSecrets $s
-    if (-not (Test-Path -LiteralPath $p)) { throw "required secret missing: $p" }
+    if (-not (Test-Path -LiteralPath $p)) { throw "required collector credential missing: $p" }
 }
 
 Assert-NotElevatedArtifact
@@ -127,7 +151,9 @@ $supervisor = Join-Path $PSScriptRoot 'memgw-supervisor.ps1'
 # -NoProfile so a user profile cannot alter behaviour at logon; -ExecutionPolicy
 # Bypass because the script is unsigned and lives on a local fixed disk (both
 # are supplied by New-MemgwHiddenScriptAction).
-$action = New-MemgwHiddenScriptAction -ScriptPath $supervisor
+# -CollectorsOnly is part of the installed action, permanently. This is the
+# registered shape now, not a stopgap: the ledger's authority is remote.
+$action = New-MemgwHiddenScriptAction -ScriptPath $supervisor -ExtraArgs $supervisorArgs
 
 # At logon of the installing user: the same account that owns the spool, the
 # token files and the agent sessions. No stored password, no SYSTEM, no
@@ -169,7 +195,7 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Settings $settings `
     -Principal $principal `
-    -Description 'memgw pilot: start gateway then collectors at logon, keep them alive.' | Out-Null
+    -Description 'memgw: keep the per-host collectors alive at logon; forward to the remote gateway.' | Out-Null
 
 Write-MemgwLog -Name 'ops' -Message "install: registered $fullName"
 
@@ -185,6 +211,7 @@ $manifest = [ordered]@{
     task_name    = $taskName
     action_hash  = Get-MemgwTaskHash -Task $registered
     supervisor   = $supervisor
+    supervisor_args = $supervisorArgs
     binary       = $script:MemgwBin
     note         = 'Remove with uninstall-memgw-persistence.ps1. Do not edit by hand; the hash will fail.'
 }
@@ -200,8 +227,12 @@ Write-Host ''
 
 # --- Verification ----------------------------------------------------------
 # Prove the task actually works, without rebooting: run the supervisor in
-# one-shot mode via the same script and interpreter the task will use, and
-# confirm readiness. This exercises the real path, not a summary of it.
+# one-shot mode via the same script, interpreter AND mode flag the task will
+# use, and confirm readiness. Verifying a different mode than the one
+# registered would prove nothing about the installed task -- the previous
+# version of this check ran -Once WITHOUT -CollectorsOnly, so it exercised the
+# gateway+collectors path and would have passed while the installed
+# collectors-only task did something else entirely.
 
 if ($SkipVerify) {
     Write-Host 'verification skipped (-SkipVerify)'
@@ -209,11 +240,11 @@ if ($SkipVerify) {
 }
 
 Write-Host 'verifying: starting supervisor one-shot...'
-$verifyExit = Start-MemgwHiddenScript -ScriptPath $supervisor -ExtraArgs @('-Once')
+$verifyExit = Start-MemgwHiddenScript -ScriptPath $supervisor -ExtraArgs ($supervisorArgs + @('-Once'))
 
 if ($verifyExit -ne 0) {
     Write-MemgwLog -Name 'ops' -Level 'error' -Message "install: one-shot verification failed exit=$verifyExit"
     throw "one-shot verification failed (exit $verifyExit); see $script:MemgwLogs\ops.log"
 }
 Write-MemgwLog -Name 'ops' -Message 'install: one-shot verification OK'
-Write-Host 'verification OK: gateway answered and collector pipes opened'
+Write-Host 'verification OK: every collector pipe opened (collectors-only mode)'
