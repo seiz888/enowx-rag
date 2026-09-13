@@ -109,18 +109,40 @@ Dry run first:
 
 What it does, in order:
 
-1. Checks the binary and the three secret files exist.
+1. Checks the binary and the **five per-host collector credentials** exist
+   (`claude`, `omp`, `codex`, `droid`, `opencode` `.token`). It does **not**
+   require `pg_app`: this install starts no local gateway, so it must not fail
+   on a machine whose local ledger has been retired.
 2. **Refuses** if a task named `\memgw\supervisor` already exists.
 3. Records the pre-existing task state to `D:\memgw\backups\ops-<stamp>\`.
 4. Registers the task.
 5. Writes the install manifest to `D:\memgw\run\installed-tasks.json`,
    including a hash of the task action.
-6. **Verifies** by running the supervisor once (`-Once`): starts the gateway,
-   waits for readiness, starts the collectors, confirms their pipes exist. The
-   install fails loudly if that verification fails.
+6. **Verifies** by running the supervisor once in **the same mode it
+   registered** (`-CollectorsOnly -Once`), confirming every collector pipe
+   opens. The install fails loudly if that verification fails.
 
-The verification runs the same script and interpreter the task will use, so it
-exercises the real path rather than describing it.
+The verification runs the same script, interpreter **and mode flag** the task
+will use, so it exercises the real path rather than describing it. This matters:
+an earlier version verified with `-Once` but *without* `-CollectorsOnly`, so it
+exercised the gateway+collectors path and would have passed while the installed
+collectors-only task did something else entirely.
+
+### Agent hook timeouts are NOT installed by this script
+
+`install-memgw-persistence.ps1` installs the **supervisor task only**. The agent
+hook wiring (Claude Code `settings.json`, OMP/OpenCode extensions, Codex and
+Droid `hooks.json`) is configured separately, and one setting in it is load
+bearing:
+
+The `--capture-turn` hooks must pass an explicit `--timeout` well above the
+binary's internal `-timeout` default of **15 s**. The child model turn that
+authors a checkpoint takes 60–80 s, so a hook relying on the default aborts
+every capture and model-authored checkpoints become **silently impossible** —
+the wrapper looks generous while the inner default fires first. The installed
+Claude Code hooks use `--timeout 150s` with a 180 s wrapper. If the hook config
+is ever regenerated, re-apply that or captures will stop being written without
+any error surfacing in the session.
 
 ---
 

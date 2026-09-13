@@ -188,20 +188,44 @@ function Get-MemgwRedactedDsn {
 function Test-MemgwGatewayReady {
     <#
     .SYNOPSIS
-        Probe the gateway until it answers, or time out.
+        Probe the LOCAL gateway until it answers, or time out.
     .DESCRIPTION
-        The gateway requires a per-principal credential, so an unauthenticated
-        request is expected to be refused with 401. That refusal is proof the
-        HTTP listener is up and routing -- which is exactly what a readiness
-        probe needs to know, and it needs no credential to learn it.
+        Probes the local gateway specifically, because that is the one
+        Start-MemgwGateway starts and the one the local startup path waits on.
+        The remote endpoint is the collectors' destination and is not started by
+        this process; asking it to be ready here would make the local stack
+        unstartable whenever the VPS was slow, for a dependency it does not have.
 
-        Returns $true when the gateway answered at all.
+        For probing an arbitrary endpoint, use Test-MemgwGatewayReadyTo.
     #>
     [CmdletBinding()]
     param(
         [int]$TimeoutSeconds = 30,
         [int]$IntervalMs = 250
     )
+    return Test-MemgwGatewayReadyTo -Url $script:MemgwLocalGatewayUrl `
+        -TimeoutSeconds $TimeoutSeconds -IntervalMs $IntervalMs
+}
+
+function Test-MemgwGatewayReadyTo {
+    <#
+    .SYNOPSIS
+        Probe a specific gateway endpoint until it answers, or time out.
+    .DESCRIPTION
+        The gateway requires a per-principal credential, so an unauthenticated
+        request is expected to be refused with 401. That refusal is proof the
+        HTTP listener is up and routing -- which is exactly what a readiness
+        probe needs to know, and it needs no credential to learn it.
+
+        Returns $true when the endpoint answered at all.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [int]$TimeoutSeconds = 30,
+        [int]$IntervalMs = 250
+    )
+    $target = $Url.TrimEnd('/')
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
         try {
@@ -209,12 +233,7 @@ function Test-MemgwGatewayReady {
             # must run on Windows PowerShell 5.1, which has no
             # -SkipHttpErrorCheck: a 401 would become a terminating error and
             # the probe would read "not ready" for a gateway that is serving.
-            # Probes the LOCAL gateway, because that is the one Start-MemgwGateway
-            # starts and the one this readiness wait guards. The remote endpoint is
-            # the collectors' destination and is not started by this process; asking
-            # it to be ready here would make the local stack unstartable whenever the
-            # VPS was slow, for a dependency it does not have.
-            $req = [System.Net.HttpWebRequest]::Create("$script:MemgwLocalGatewayUrl/memgw/v1/health")
+            $req = [System.Net.HttpWebRequest]::Create("$target/memgw/v1/health")
             $req.Method = 'GET'
             $req.Timeout = 3000
             $req.AllowAutoRedirect = $false
