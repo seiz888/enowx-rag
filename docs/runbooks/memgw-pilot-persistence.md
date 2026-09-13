@@ -1,7 +1,22 @@
 # memgw pilot persistence — install, status, uninstall
 
-Operational procedure for keeping the local memgw gateway and its
-per-principal collectors alive across logoff and reboot.
+Operational procedure for keeping this workstation's memgw **collectors** alive
+across logoff and reboot.
+
+> **The ledger moved. Read this first.**
+>
+> The canonical ledger is now the dedicated VPS cluster, not this workstation.
+> The supervisor runs in **collectors-only** mode: it starts and watches the five
+> collectors and does **not** start, require or restart a local gateway, and does
+> not touch the local containers. The collectors forward to the authoritative
+> gateway over TLS (`https://rag.seiz.cloud`), so the local stack has no role in
+> the write path.
+>
+> Starting a local gateway would resurrect a **second writer** against a stopped
+> local database. That is a rollback action requiring explicit authorisation, not
+> an installer side effect — see `D:\memgw\run\cutover-state.txt`. Any rollback is
+> **forward-only**: epoch 2 stays the only admitted epoch and the target stays
+> authoritative.
 
 **Scope.** This runbook covers process persistence only. It does not change
 checkpoint semantics, the resolver, or any agent's settings. It starts the
@@ -12,8 +27,8 @@ same binaries with the same arguments an operator would type.
 | Script | Purpose |
 |---|---|
 | `Memgw.Common.ps1` | Shared: paths, secret reading, readiness probes, launch helpers, task hashing |
-| `memgw-supervisor.ps1` | Starts gateway → waits → starts collectors; restarts on death |
-| `install-memgw-persistence.ps1` | Registers `\memgw\supervisor`; verifies by running it once |
+| `memgw-supervisor.ps1` | Starts the five collectors and restarts them on death. `-CollectorsOnly` is the registered mode; the default (`gateway+collectors`) is retained only for the documented rollback path |
+| `install-memgw-persistence.ps1` | Registers `\memgw\supervisor` with `-CollectorsOnly` permanently; verifies by running it once **in the same mode it registered**. Requires only the five collector credentials — not the local database secret |
 | `status-memgw-persistence.ps1` | Tasks, processes, gateway readiness, queue counts |
 | `uninstall-memgw-persistence.ps1` | Removes exactly what install recorded |
 
@@ -55,15 +70,21 @@ anything that died.
 
 **No secret appears in any task action, argument, log, or process command line.**
 
-- The gateway's PostgreSQL password is read from `D:\memgw\secrets\pg_app` and
-  composed into `MEMGW_DSN` **inside the PowerShell runspace**, then handed to
-  the child through its environment block. It is never an argument.
 - Each collector names its credential with `--token-file <path>`; the binary
   reads the file itself. The value never enters this toolkit's process.
-- Logs record the DSN **redacted** (`127.0.0.1:55440/memgw`), never the
-  credential.
+- **There is no local database secret any more.** The collectors-only install
+  does not compose a `MEMGW_DSN`, so it does not read `D:\memgw\secrets\pg_app`
+  at all, and it cannot fail on a machine whose local ledger has been retired.
+  That dependency is gone deliberately: it was what made a client install fail
+  after the authority moved. Proven at runtime by moving `pg_app` aside and
+  running the collectors-only one-shot to a successful exit.
 
-Verified: launching the gateway through the helper produces the command line
+The gateway path below applies **only** to the documented rollback scenario.
+When it is used, the gateway's PostgreSQL password is read from
+`D:\memgw\secrets\pg_app` and composed into `MEMGW_DSN` **inside the PowerShell
+runspace**, then handed to the child through its environment block — never as an
+argument, and logs record the DSN **redacted**, never the credential. Verified:
+launching the gateway through the helper produces the command line
 
 ```
 "D:\memgw\bin\enowx-rag.exe" memgw serve --addr 127.0.0.1:7791

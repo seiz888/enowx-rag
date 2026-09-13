@@ -7,7 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Shared-memory authority moved to the dedicated VPS.** The canonical ledger is now a
+  PostgreSQL 16 cluster on `168.110.218.207` (port 5433) — a separate cluster from AxonHub's
+  `main`, so archiving and maintenance never touch AxonHub — with the gateway served at
+  `https://rag.seiz.cloud/memgw/` and the principal's `Authorization` forwarded **verbatim**.
+  Workstations keep only hooks, collectors and a durable spool. Writer epoch 1 (workstation)
+  is fenced; epoch 2 is the only admitted epoch, and the handover is **forward-only** — a
+  fenced epoch cannot be re-opened, so a correction is a forward migration on the target.
+- The workstation supervisor installs **collectors-only** permanently and no longer composes a
+  local database DSN, so a client install cannot resurrect a second writer or fail on a
+  machine whose local ledger has been retired.
+- Backup manifests are derived from the **restored dump** rather than the live ledger, so the
+  counts and the bytes describe one instant; the unencrypted dump now lives only in a private
+  `0700` staging directory.
+
 ### Fixed
+- **Model-authored checkpoints were silently impossible**: the `--capture-turn` hooks carried a
+  90 s wrapper timeout while the binary's internal `-timeout` defaulted to 15 s and the child
+  model turn needs 60–80 s, so every hook-driven capture failed without an obvious signal.
+- Backup: SIGPIPE aborted the run after verification and the exit trap then deleted the verified
+  dump; manifest counts were glued together by `tr -d ' '`; retention looked for the wrong
+  sidecar name and reported zero kept artefacts while they sat on disk.
+- Health check rejected every correct v2 backup because it required a `.iv` (a v1 artefact), and
+  could not tell a deliberate cutover grace window from a split brain.
 - Reject credential-shaped content before shared-memory embedding and validate
   full migration exports before destination mutation.
 - Fail closed on authentication configuration errors; bound search candidates

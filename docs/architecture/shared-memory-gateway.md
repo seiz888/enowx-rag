@@ -1,12 +1,29 @@
 # Shared Memory Gateway — frozen contract
 
 **Contract version:** `schema_version = 1.0.0`, `policy_version = 1.0.0`
-**Status:** frozen at Phase 2 (2026-09-09). Nothing here is deployed. No migration has been applied
-to any database, no service has been changed, no credential has been created.
+**Status:** the contract is **frozen** and the gateway is **deployed and serving production**
+(cutover 2026-09-12). The authority is the dedicated VPS ledger; see "Where it runs" below. The
+line that used to stand here — *"Nothing here is deployed. No migration has been applied to any
+database, no service has been changed, no credential has been created."* — is no longer true and
+has been replaced rather than left to mislead.
 **Change rule:** any change to a frozen field, enum value, error class or invariant is a new
 `schema_version`. Adding an optional field is a minor bump; removing or re-typing one is a major bump.
 Fixtures under `mcp-server/pkg/memgw/contract/testdata/` are part of the contract, not illustrations
 of it.
+
+### Where it runs
+
+| Component | Where |
+|---|---|
+| Canonical ledger | **VPS `168.110.218.207`**, dedicated PostgreSQL 16 cluster `memgw` on port **5433** — a *separate cluster* from AxonHub's `main`, so `archive_mode` and maintenance never touch AxonHub |
+| Gateway (`memgw serve`) | VPS, `127.0.0.1:7791`, exposed as `https://rag.seiz.cloud/memgw/` with the principal's `Authorization` passed **verbatim** (never the shared admin token, which would escalate every principal to admin) |
+| Projection worker | VPS, draining into a private Qdrant on `127.0.0.1:6335` |
+| Backups | VPS, daily `memgw-backup.timer`, sealed to an escrowed recovery key; an off-host copy is pulled to the workstation |
+| This workstation | **collectors only** — hooks spool durably and forward over TLS. The local ledger, Qdrant and gateway are retired (`restart=no`) and are not writers |
+
+**Writer epochs** order the handover: epoch 1 (workstation) was **fenced**; epoch 2 is the only
+admitted epoch. A fenced epoch cannot be re-opened, so any correction is a **forward** migration
+on the target — there is no return to epoch 1 and no return to the local gateway as writer.
 
 Implementation plan and phase history: [`../plans/shared-memory-gateway-implementation.md`](../plans/shared-memory-gateway-implementation.md).
 Authority decision and its alternatives: [`../adr/0001-shared-memory-authority.md`](../adr/0001-shared-memory-authority.md).
