@@ -31,6 +31,8 @@ same binaries with the same arguments an operator would type.
 | `install-memgw-persistence.ps1` | Registers `\memgw\supervisor` with `-CollectorsOnly` permanently; verifies by running it once **in the same mode it registered**. Requires only the five collector credentials — not the local database secret |
 | `status-memgw-persistence.ps1` | Tasks, processes, gateway readiness, queue counts |
 | `uninstall-memgw-persistence.ps1` | Removes exactly what install recorded |
+| `install-memgw-ledger-pull.ps1` | Registers `\memgw\ledger-pull`: fetches the authoritative ledger backup from the VPS into the off-host copy and proves it recoverable |
+| `uninstall-memgw-ledger-pull.ps1` | Removes exactly `\memgw\ledger-pull`, refusing if the task was hand-edited |
 
 ---
 
@@ -52,9 +54,29 @@ One Scheduled Task:
 
 ### Why one task, not three
 
-The gateway must be answering before a collector accepts a hook. Three
-independent tasks would race that ordering on every logon; one supervisor owns
-the order in one readable place.
+The collectors share a spool layout and a set of credentials; one supervisor
+owns starting and watching all five in one readable place, rather than three
+independent tasks that could each be the one missing after a reboot.
+
+### The backup tasks, and the two that were retired
+
+The ledger's move changed which direction a backup travels. Two tasks were left
+over from the old direction and have been **retired**, because both could only
+ever move stale data:
+
+| Task | Was | Now |
+|---|---|---|
+| `\memgw\ledger-backup` | Ran `D:\memgw\backup.ps1`, which dumps the **local** `memgw-live` container | **Retired.** That container no longer holds the ledger, so the script could only fail (`container memgw-live is not running`) or, worse, produce a well-formed artefact of a retired database. |
+| `\memgw\ledger-offhost` | Pushed the newest local artefact to the VPS | **Retired.** It shipped a 136-event artefact of the retired workstation ledger while the authority was at 157 events, and exited 0 — every guard checked the artefact was *well-formed*, none asked whether it was still *the ledger*. The script now refuses when `memgw-live` is not running, but the task has no remaining job. |
+| `\memgw\ledger-pull` | — | **New.** Fetches the authoritative artefact *from* the VPS into `D:\memgw-backups\vps\sealed`, verifies its sha256, and proves recovery by unsealing it with the escrowed key. A pull is the correct direction for an off-host copy: it survives a compromised or lost source host, which a push cannot. |
+
+The gap this closed was real: `pull-memgw-backup.ps1` existed and was
+documented, but **nothing scheduled it**. The only backup tasks that actually
+ran were the two pushers, so the workstation held no off-host copy of the
+authoritative ledger while appearing to have a working backup pipeline.
+
+Install with `install-memgw-ledger-pull.ps1`; it verifies by performing one real
+pull, which must exit 0 and produce a recovery proof in the log.
 
 ### Why Task Scheduler alone was not enough
 

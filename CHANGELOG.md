@@ -21,8 +21,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Backup manifests are derived from the **restored dump** rather than the live ledger, so the
   counts and the bytes describe one instant; the unencrypted dump now lives only in a private
   `0700` staging directory.
+- **The workstation now pulls the authoritative ledger backup** via `\memgw\ledger-pull`
+  (`install-memgw-ledger-pull.ps1`). A pull is the correct direction for an off-host copy — it
+  survives a lost source host, which a push cannot. The two tasks that ran the old direction,
+  `\memgw\ledger-backup` and `\memgw\ledger-offhost`, are **retired**: they could only produce
+  or ship artefacts of the retired local ledger.
+- `status-memgw-persistence.ps1` reports the gateway endpoint **its supervisor mode actually
+  uses**, and marks the local address as retired in collectors-only mode. It previously probed
+  the stopped local gateway unconditionally and printed `ready: False` on every run of a
+  correctly-migrated client — a permanently wrong field trains the reader to ignore it.
 
 ### Fixed
+- **No task scheduled an off-host copy of the authoritative ledger.** `pull-memgw-backup.ps1`
+  existed and was documented, but nothing ran it; the only live backup tasks were the two
+  pushers, so the workstation held no off-host copy while appearing to have a working pipeline.
+- **An off-host job shipped a retired-ledger artefact and exited 0.** `push-ledger-offhost.ps1`
+  selected `memgw-20260912-153638` (136 events) while the authority was at 157 — every guard
+  checked the artefact was *well-formed*, none asked whether it was still *the ledger*, and a
+  freshness check against its own remote directory could not help because both sides went stale
+  together. The gate is now whether this workstation still has a ledger.
 - **Model-authored checkpoints were silently impossible**: the `--capture-turn` hooks carried a
   90 s wrapper timeout while the binary's internal `-timeout` defaulted to 15 s and the child
   model turn needs 60–80 s, so every hook-driven capture failed without an obvious signal.
