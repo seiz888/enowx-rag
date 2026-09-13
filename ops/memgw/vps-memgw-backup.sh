@@ -36,6 +36,13 @@
 
 set -euo pipefail
 
+# Everything this run writes is either plaintext (the pre-seal dump) or a
+# secret (the unwrapped data key). The process umask is set first, before any
+# file is created, so nothing depends on the invoking environment's default: a
+# `0644` umask would leave an unencrypted ledger dump world-readable on disk,
+# which is the whole thing the envelope exists to prevent.
+umask 077
+
 DB="${MEMGW_BACKUP_DB:-memgw}"
 PORT="${MEMGW_BACKUP_PORT:-5433}"
 DEST="${MEMGW_BACKUP_DEST:-/opt/memgw/backup}"
@@ -48,23 +55,46 @@ ENVELOPE=/opt/memgw/bin/ledger-envelope.py
 RECOVERY_PUB=/opt/memgw/bin/ledger-recovery.pub.pem
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 STEM="$DEST/memgw-$STAMP.dump"
-DUMP="$STEM.gz"
 SEALED="$STEM.aes"
 
 log() { echo "$(date -Is) $*"; }
 fail() { echo "$(date -Is) FAILED: $*" >&2; exit 1; }
 
 KEYFILE=""
+# Private staging, created before the plaintext path is named so the dump can
+# never be pointed anywhere else. The unencrypted stream exists ONLY inside this
+# 0700 directory; only the sealed artefact is ever written to $DEST. `mktemp -d`
+# is 0700 by construction, and chmod is belt-and-braces for an odd umask.
+STAGE=$(mktemp -d /tmp/memgw-backup-XXXXXX)
+chmod 700 "$STAGE"
+# The unencrypted dump lives here, not in $DEST. Naming it after $STEM would put
+# plaintext in the backup directory, which is precisely what sealing exists to
+# avoid -- and on this host it would also be served to the pull script's stash.
+DUMP="$STAGE/ledger.dump.gz"
+
+# Plaintext must not outlive the run on ANY exit path -- success, failure, or a
+# signal. `rm -f` on a possibly-unset variable is why every path is listed
+# explicitly here: an early `fail` before the variables are assigned must not
+# turn the trap itself into the error that masks the real one.
 cleanup() {
-  rm -f "${DUMP:-}" "${KEYFILE:-}" 2>/dev/null || true
-  # The unsealed verification copy is plaintext; it must not outlive the run.
-  rm -f "${VERIFY_OUT:-}" 2>/dev/null || true
+  rm -f "${DUMP:-/nonexistent}" \
+        "${DUMP:-/nonexistent}.part" \
+        "${KEYFILE:-/nonexistent}" \
+        "${VERIFY_OUT:-/nonexistent}" 2>/dev/null || true
+  # The staging directory holds the uncompressed dump; remove the whole thing.
+  [ -n "${STAGE:-}" ] && rm -rf "$STAGE" 2>/dev/null || true
 }
+# EXIT covers normal exit and `fail` (which exits non-zero); the explicit
+# signal traps cover a killed run, where EXIT alone is not guaranteed to fire
+# before the process dies.
 trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
 
 [ -x "$ENVELOPE" ] || fail "envelope helper not found at $ENVELOPE"
 [ -f "$RECOVERY_PUB" ] || fail "recovery public key not found at $RECOVERY_PUB (a backup with no cross-machine path is not a backup)"
-install -d -m 0755 "$DEST"
+# 0700: the artefact and its key wrapper live here, and the key wrapper is the
+# part that makes the payload readable. The directory is not a share point.
+install -d -m 0700 "$DEST"
 
 # --- disk floor --------------------------------------------------------------
 avail=$(df -B1 --output=avail "$DEST" | tail -1 | tr -d ' ')
@@ -74,13 +104,16 @@ fi
 log "free space ${avail} bytes"
 
 # --- dump (streamed) ---------------------------------------------------------
-tmp_dump="$DUMP.part"
 # Run as the postgres OS user so the socket is reachable via peer auth for the
 # superuser; the connection string never carries a password.
-if ! sudo -u postgres pg_dump -p "$PORT" -Fc -d "$DB" | gzip -1 > "$tmp_dump"; then
+#
+# The dump goes to private staging, not to $DEST: the unencrypted stream must
+# exist only inside the 0700 directory that is removed by the trap.
+if ! sudo -u postgres pg_dump -p "$PORT" -Fc -d "$DB" | gzip -1 > "$STAGE/payload.gz"; then
   fail "pg_dump failed; no partial dump retained"
 fi
-mv "$tmp_dump" "$DUMP"
+mv "$STAGE/payload.gz" "$DUMP"
+rmdir "$STAGE" 2>/dev/null || true
 
 # --- verify the dump is a dump ----------------------------------------------
 gzip -t "$DUMP" || fail "gzip integrity check failed on $DUMP"
@@ -101,6 +134,48 @@ TOC=$(gzip -dc "$DUMP" 2>/dev/null | pg_restore -l 2>/dev/null | grep -cE '^[0-9
 SIZE=$(stat -c %s "$DUMP")
 SHA=$(sha256sum "$DUMP" | cut -d' ' -f1)
 log "dumped: $(basename "$DUMP") size=$SIZE toc=$TOC sha256=$SHA"
+
+# --- restore-verify BEFORE sealing, and derive the counts from the restore ----
+#
+# The counts MUST describe the same instant as the bytes. Querying the live
+# ledger here would race pg_dump: the dump has already returned, so any write
+# landing between those two moments makes the manifest describe a database the
+# artefact does not contain. On an actively written ledger that window is not
+# merely possible -- it is likely, and it yields a manifest that is *plausibly*
+# wrong rather than obviously wrong.
+#
+# So the counts are read from the dump itself, by restoring it into a scratch
+# database. This is the stronger statement: it proves the artefact is
+# restorable, which a magic-byte check does not, and it is done BEFORE sealing
+# so nothing is ever sealed that could not be restored.
+SCRATCH="memgw_backup_verify_$$"
+sudo -u postgres dropdb -p "$PORT" --if-exists "$SCRATCH" 2>/dev/null || true
+sudo -u postgres createdb -p "$PORT" -T template0 -E UTF8 "$SCRATCH" \
+  || fail "could not create the scratch database to verify the dump"
+drop_scratch() { sudo -u postgres dropdb -p "$PORT" --if-exists "$SCRATCH" 2>/dev/null || true; }
+
+# `--no-owner`: the artifacts are owned by memgw_migrator, which exists here, but
+# ownership is irrelevant to counting rows and skipping it avoids making the
+# backup depend on role setup a restore would re-apply anyway.
+if ! gzip -dc "$DUMP" | sudo -u postgres pg_restore -p "$PORT" -d "$SCRATCH" --no-owner --exit-on-error >/dev/null 2>&1; then
+  drop_scratch
+  fail "the dump did not restore into a scratch database; refusing to seal it"
+fi
+
+COUNTS=$(sudo -u postgres psql -p "$PORT" -d "$SCRATCH" -tAc \
+  "SELECT 'events='||(SELECT count(*) FROM memgw.events)||' receipts='||(SELECT count(*) FROM memgw.write_receipts)||' max_seq='||(SELECT COALESCE(max(seq),0) FROM memgw.events)")
+# Only touch leading/trailing whitespace (psql pads the line). Stripping every
+# space would glue the fields into `events=135receipts=135`, which no reader can
+# parse and which would then disagree with the restore-side comparison.
+COUNTS="$(echo "$COUNTS" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+# The restore must also be internally consistent, or the manifest would bless a
+# broken artefact with authoritative-looking numbers.
+ORPHANS=$(sudo -u postgres psql -p "$PORT" -d "$SCRATCH" -tAc \
+  "SELECT (SELECT count(*) FROM memgw.events e LEFT JOIN memgw.write_receipts r ON r.event_id=e.event_id WHERE r.event_id IS NULL) + (SELECT count(*) FROM memgw.write_receipts r LEFT JOIN memgw.events e ON e.event_id=r.event_id WHERE e.event_id IS NULL)")
+drop_scratch
+[ "$ORPHANS" = "0" ] || fail "the restored dump has $ORPHANS orphaned event/receipt rows; refusing to seal it"
+log "restore-verified: $COUNTS (orphans 0)"
 
 # --- seal --------------------------------------------------------------------
 KEYFILE=$(mktemp /dev/shm/memgw-key-XXXXXX 2>/dev/null || mktemp /tmp/memgw-key-XXXXXX)
@@ -126,14 +201,9 @@ SEALED_SIZE=$(stat -c %s "$SEALED")
 log "sealed: $(basename "$SEALED") size=$SEALED_SIZE recovery=$FP verified=yes"
 
 # --- manifest ----------------------------------------------------------------
-# Provenance travels with the artefact: a restore reconciles against these
-# counts, not against the live ledger (which keeps moving).
-COUNTS=$(sudo -u postgres psql -p "$PORT" -d "$DB" -tAc \
-  "SELECT 'events='||(SELECT count(*) FROM memgw.events)||' receipts='||(SELECT count(*) FROM memgw.write_receipts)||' max_seq='||(SELECT COALESCE(max(seq),0) FROM memgw.events)")
-# Only touch leading/trailing whitespace (psql pads the line). Stripping every
-# space would glue the fields into `events=135receipts=135`, which no reader can
-# parse and which would then disagree with the restore-side comparison.
-COUNTS="$(echo "$COUNTS" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+# `$COUNTS` was derived from the restored dump (see above), so the numbers and
+# the bytes describe one instant. Provenance travels with the artefact; a
+# restore reconciles against these counts, never against the live ledger.
 # One naming convention for the whole artefact, derived from $STEM:
 #
 #   $STEM.aes                              the authenticated payload
