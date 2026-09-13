@@ -198,9 +198,47 @@ $localSha = Get-Sha256Hex -Path $newest.FullName
 $localSize = $newest.Length
 Write-Log "artefact: $($newest.Name) ($localSize bytes, $toc TOC entries, sha256 $localSha, recovery $fingerprint)"
 
+# --- is this host still a ledger, or is it retired? --------------------------
+#
+# THE DEFECT THIS EXISTS FOR. Every check above validates that the artefact is
+# *well-formed*. None asks whether it is still *the ledger*. After the cutover
+# this script kept selecting a 136-event artefact produced by the retired
+# workstation ledger while the authoritative VPS ledger had passed 157, and it
+# exited 0 -- a backup reporting success while being stale. That is worse than
+# no backup: the off-host copy exists so a loss can be recovered, and a green
+# log pointing at the wrong ledger is a recovery that fails exactly when it is
+# needed.
+#
+# A freshness comparison against this script's OWN remote directory cannot
+# catch it: both sides were fed by the same retired pipeline, so both went
+# stale together and compared equal. The signal that actually distinguishes the
+# cases is whether this workstation still has a ledger to back up at all.
+#
 if ($WhatIfPreference) {
     Write-Host "would transfer $($newest.Name) (+manifest +sha256 +key.recovery +fingerprint) to ${sshTarget}:$RemoteDir"
     exit 0
+}
+
+# The artefact is produced from `$ContainerName`. If that container is not
+# running, no new artefact can be produced from it, so whatever sits in $Dest
+# is a leftover by construction and shipping it would publish the stale copy
+# under a fresh timestamp.
+$ledgerRunning = $false
+try {
+    $state = (& docker inspect -f '{{.State.Running}}' $ContainerName 2>&1) -join ''
+    $ledgerRunning = ("$state".Trim() -eq 'true')
+} catch {
+    $ledgerRunning = $false
+}
+
+if (-not $ledgerRunning) {
+    Write-Log "the local ledger container '$ContainerName' is not running; this workstation is not a ledger"
+    throw ("refusing to ship an off-host copy of a retired ledger. " +
+           "'$ContainerName' is not running, so $($newest.Name) is a leftover and cannot be a backup of the authoritative ledger. " +
+           "After the cutover the authority is the VPS: its own memgw-backup.timer produces the sealed artefacts, and " +
+           "pull-memgw-backup.ps1 pulls those off-host with escrowed-key recovery. This script is the pre-cutover path " +
+           "and is superseded; if the workstation ledger has been deliberately brought back as the authority, start " +
+           "'$ContainerName' first.")
 }
 
 # Which files make up the artefact, and therefore what travels and what is
